@@ -35,7 +35,9 @@ import argparse
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Utility to convert a MJCF into USD format.")
+parser = argparse.ArgumentParser(
+    description="Utility to convert a MJCF into USD format."
+)
 parser.add_argument("input", type=str, help="The path to the input MJCF file.")
 parser.add_argument("output", type=str, help="The path to store the USD file.")
 parser.add_argument(
@@ -77,8 +79,13 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Rest everything follows."""
+# enable the MJCF importer extension
+import omni.kit.app
 
+ext_manager = omni.kit.app.get_app().get_extension_manager()
+ext_manager.set_extension_enabled_immediate("isaacsim.asset.importer.mjcf", True)
+
+"""Rest everything follows."""
 import contextlib
 import os
 

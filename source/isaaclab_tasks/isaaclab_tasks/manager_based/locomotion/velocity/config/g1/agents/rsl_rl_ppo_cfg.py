@@ -5,7 +5,11 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
@@ -14,6 +18,7 @@ class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     max_iterations = 3000
     save_interval = 50
     experiment_name = "g1_rough"
+    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
         actor_obs_normalization=False,
@@ -47,3 +52,19 @@ class G1FlatPPORunnerCfg(G1RoughPPORunnerCfg):
         self.experiment_name = "g1_flat"
         self.policy.actor_hidden_dims = [256, 128, 128]
         self.policy.critic_hidden_dims = [256, 128, 128]
+
+
+@configclass
+class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.experiment_name = "g1_jump"
+        self.max_iterations = 100000
+        self.save_interval = 500
+
+        self.policy.actor_hidden_dims = [1024, 1024, 1024, 1024, 1024, 1024]
+        self.policy.critic_hidden_dims = [1024, 1024, 1024, 1024]
+        self.num_steps_per_env = 32
+        self.algorithm.learning_rate = 5e-5
+        self.algorithm.num_mini_batches = 4
