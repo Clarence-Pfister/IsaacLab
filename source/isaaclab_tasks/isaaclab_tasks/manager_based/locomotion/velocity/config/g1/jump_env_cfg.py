@@ -28,9 +28,13 @@ from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import (
+    axis_angle_from_quat,
     quat_from_euler_xyz,
     euler_xyz_from_quat,
     convert_quat,
+    normalize,
+    quat_conjugate,
+    quat_mul,
     quat_unique,
     combine_frame_transforms,
 )
@@ -51,24 +55,14 @@ REFERENCE_NUM_FRAMES = 91
 REFERENCE_MOTION_FPS = 30.0
 REFERENCE_DURATION_S = REFERENCE_NUM_FRAMES / REFERENCE_MOTION_FPS
 NUMBER_OF_JOINTS = 23
-
-JUMP_PHASE_STAND_PREP = 0
-JUMP_PHASE_CROUCH = 1
-JUMP_PHASE_TAKEOFF = 2
-JUMP_PHASE_FLIGHT_PEAK = 3
-JUMP_PHASE_LANDING = 4
-JUMP_PHASE_FINAL_STAND = 5
-JUMP_PHASE_COUNT = 6
-JUMP_PHASE_FRAME_ENDS = (6, 19, 26, 43, 60)
-JUMP_PHASE_TIME_ENDS_S = tuple(
-    frame / REFERENCE_MOTION_FPS for frame in JUMP_PHASE_FRAME_ENDS
-)
-JUMP_STAND_PREP_END_S = JUMP_PHASE_TIME_ENDS_S[0]
-JUMP_CROUCH_END_S = JUMP_PHASE_TIME_ENDS_S[1]
-JUMP_TAKEOFF_END_S = JUMP_PHASE_TIME_ENDS_S[2]
-JUMP_FLIGHT_PEAK_END_S = JUMP_PHASE_TIME_ENDS_S[3]
-JUMP_LANDING_END_S = JUMP_PHASE_TIME_ENDS_S[4]
-JUMP_EPISODE_LENGTH_S = REFERENCE_DURATION_S
+JUMP_PHASES = {
+    "IDLE": (0, 6),
+    "CROUCH": (6, 19),
+    "TAKEOFF": (19, 26),
+    "FLIGHT": (26, 43),
+    "LAND": (43, 60),
+    "STAND": (60, 91),
+}
 
 G1_USD_PATH = str(
     DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda"
@@ -162,6 +156,32 @@ G1_23DOF_HOLO_COMPAT_CFG.actuators = G1_23DOF_HOLO_COMPAT_ACTUATORS
 # =============================================================================
 
 
+def slerp_quat(
+    q0: torch.Tensor,
+    q1: torch.Tensor,
+    blend: torch.Tensor,
+    eps: float = 1.0e-8,
+) -> torch.Tensor:
+    """Batched SLERP for xyzw quaternions."""
+    q0 = normalize(q0)
+    q1 = normalize(q1)
+    dot = torch.sum(q0 * q1, dim=-1, keepdim=True)
+    q1 = torch.where(dot < 0.0, -q1, q1)
+    dot = torch.clamp(torch.abs(dot), max=1.0)
+
+    use_lerp = dot > 0.9995
+    lerp = normalize((1.0 - blend) * q0 + blend * q1)
+
+    theta_0 = torch.acos(dot)
+    sin_theta_0 = torch.sin(theta_0)
+    theta = theta_0 * blend
+    sin_theta = torch.sin(theta)
+    s0 = torch.cos(theta) - dot * sin_theta / torch.clamp(sin_theta_0, min=eps)
+    s1 = sin_theta / torch.clamp(sin_theta_0, min=eps)
+    slerp = normalize(s0 * q0 + s1 * q1)
+    return torch.where(use_lerp, lerp, slerp)
+
+
 class MotionLoader:
     """Handles loading and interpolation of joint and root motion data from a CSV file."""
 
@@ -187,6 +207,7 @@ class MotionLoader:
         self.ref_joint_vel[1:] = (
             self.ref_joint_pos[1:] - self.ref_joint_pos[:-1]
         ) / motion_dt
+
         # Root Translation & Linear Velocity
         root_pos_cols = ["root_translateX", "root_translateY", "root_translateZ"]
         self.ref_root_pos = torch.tensor(
@@ -196,16 +217,28 @@ class MotionLoader:
         self.ref_root_vel[1:] = (
             self.ref_root_pos[1:] - self.ref_root_pos[:-1]
         ) / motion_dt
-        # Root Quaternions
+
+        # Root Quaternions & Angular Rate
         root_quat_cols = [
             "root_quaternionW",
             "root_quaternionX",
             "root_quaternionY",
             "root_quaternionZ",
         ]
-        self.ref_root_quat = torch.tensor(
-            df[root_quat_cols].values, device=device, dtype=torch.float32
+        self.ref_root_quat = normalize(
+            convert_quat(
+                torch.tensor(
+                    df[root_quat_cols].values, device=device, dtype=torch.float32
+                ),
+                to="xyzw",
+            )
         )
+        self.ref_root_ang_vel = torch.zeros_like(self.ref_root_pos)
+        root_delta_quat = quat_mul(
+            self.ref_root_quat[1:], quat_conjugate(self.ref_root_quat[:-1])
+        )
+        self.ref_root_ang_vel[1:] = axis_angle_from_quat(root_delta_quat) / motion_dt
+
         # Foot Heights
         foot_cols = ["left_foot_height", "right_foot_height"]
         self.ref_foot_height = torch.tensor(
@@ -232,28 +265,34 @@ class MotionLoader:
         idx_low = torch.floor(frame_idx_float).to(torch.long)
         idx_high = torch.ceil(frame_idx_float).to(torch.long)
 
-        alpha = (frame_idx_float - idx_low).unsqueeze(-1)
+        gradient = (frame_idx_float - idx_low).unsqueeze(-1)
         idx_low = torch.clamp(idx_low, max=self.length - 1)
         idx_high = torch.clamp(idx_high, max=self.length - 1)
         is_clamp = (idx_low >= self.length - 1).unsqueeze(-1)
 
         # Interpolate
-        interp_joint_pos = (1.0 - alpha) * self.ref_joint_pos[
+        interp_joint_pos = (1.0 - gradient) * self.ref_joint_pos[
             idx_low
-        ] + alpha * self.ref_joint_pos[idx_high]
-        interp_root_pos = (1.0 - alpha) * self.ref_root_pos[
+        ] + gradient * self.ref_joint_pos[idx_high]
+        interp_root_pos = (1.0 - gradient) * self.ref_root_pos[
             idx_low
-        ] + alpha * self.ref_root_pos[idx_high]
-        interp_foot_height = (1.0 - alpha) * self.ref_foot_height[
+        ] + gradient * self.ref_root_pos[idx_high]
+        interp_foot_height = (1.0 - gradient) * self.ref_foot_height[
             idx_low
-        ] + alpha * self.ref_foot_height[idx_high]
+        ] + gradient * self.ref_foot_height[idx_high]
+        interp_root_quat = slerp_quat(
+            self.ref_root_quat[idx_low], self.ref_root_quat[idx_high], gradient
+        )
 
-        interp_joint_vel = (1.0 - alpha) * self.ref_joint_vel[
+        interp_joint_vel = (1.0 - gradient) * self.ref_joint_vel[
             idx_low
-        ] + alpha * self.ref_joint_vel[idx_high]
-        interp_root_vel = (1.0 - alpha) * self.ref_root_vel[
+        ] + gradient * self.ref_joint_vel[idx_high]
+        interp_root_vel = (1.0 - gradient) * self.ref_root_vel[
             idx_low
-        ] + alpha * self.ref_root_vel[idx_high]
+        ] + gradient * self.ref_root_vel[idx_high]
+        interp_root_ang_vel = (1.0 - gradient) * self.ref_root_ang_vel[
+            idx_low
+        ] + gradient * self.ref_root_ang_vel[idx_high]
 
         # Zero velocities if animation finished
         interp_joint_vel = torch.where(
@@ -262,12 +301,19 @@ class MotionLoader:
         interp_root_vel = torch.where(
             is_clamp[..., :3], torch.zeros_like(interp_root_vel), interp_root_vel
         )
+        interp_root_ang_vel = torch.where(
+            is_clamp[..., :3],
+            torch.zeros_like(interp_root_ang_vel),
+            interp_root_ang_vel,
+        )
 
         return (
             interp_joint_pos,
             interp_joint_vel,
             interp_root_pos,
             interp_root_vel,
+            interp_root_quat,
+            interp_root_ang_vel,
             interp_foot_height,
         )
 
@@ -279,66 +325,34 @@ def get_loader(env) -> MotionLoader:
     return env.motion_loader
 
 
-def get_reward(u: torch.Tensor, v: torch.Tensor, alpha: float) -> torch.Tensor:
+def get_reward(u: torch.Tensor, v: torch.Tensor, gradient: float) -> torch.Tensor:
     """Computes bounded reward using exponential of negative squared error."""
-    return torch.exp(-alpha * torch.sum(torch.square(u - v), dim=-1))
+    return torch.exp(-gradient * torch.sum(torch.square(u - v), dim=-1))
 
 
 def get_jump_phase(env) -> torch.Tensor:
     """Returns the current reference jump phase for each environment."""
     current_time = get_env_time(env)
-    phase = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)
-    phase = torch.where(
-        current_time >= JUMP_STAND_PREP_END_S,
-        torch.full_like(phase, JUMP_PHASE_CROUCH),
-        phase,
+    phase_starts = torch.tensor(
+        [start / REFERENCE_MOTION_FPS for start, _ in JUMP_PHASES.values()][1:],
+        device=env.device,
+        dtype=current_time.dtype,
     )
-    phase = torch.where(
-        current_time >= JUMP_CROUCH_END_S,
-        torch.full_like(phase, JUMP_PHASE_TAKEOFF),
-        phase,
-    )
-    phase = torch.where(
-        current_time >= JUMP_TAKEOFF_END_S,
-        torch.full_like(phase, JUMP_PHASE_FLIGHT_PEAK),
-        phase,
-    )
-    phase = torch.where(
-        current_time >= JUMP_FLIGHT_PEAK_END_S,
-        torch.full_like(phase, JUMP_PHASE_LANDING),
-        phase,
-    )
-    phase = torch.where(
-        current_time >= JUMP_LANDING_END_S,
-        torch.full_like(phase, JUMP_PHASE_FINAL_STAND),
-        phase,
-    )
-    return phase
+    return torch.bucketize(current_time, phase_starts, right=True)
 
 
 def get_phase_weight(env, phase_weights: Sequence[float]) -> torch.Tensor:
     """Returns a per-environment scalar weight selected by jump phase."""
-    if len(phase_weights) != JUMP_PHASE_COUNT:
-        raise ValueError(
-            f"Expected {JUMP_PHASE_COUNT} phase weights, got {len(phase_weights)}."
-        )
     weights = torch.tensor(phase_weights, device=env.device, dtype=torch.float32)
     return weights[get_jump_phase(env)]
 
 
-def get_weight(
-    env,
-    Tj: float,
-    w_before: float,
-    w_after: float,
-    phase_weights: Sequence[float] | None = None,
-) -> torch.Tensor:
-    """Returns dynamic weight based on jump phase or elapsed episode time."""
-    if phase_weights is not None:
-        return get_phase_weight(env, phase_weights)
-
-    current_time = get_env_time(env)
-    return torch.where(current_time <= Tj, w_before, w_after)
+def get_phase_id(phase_name: str) -> int:
+    """Returns the integer phase id from the ordered JUMP_PHASES mapping."""
+    try:
+        return list(JUMP_PHASES).index(phase_name)
+    except ValueError as exc:
+        raise ValueError(f"Unknown jump phase: {phase_name}.") from exc
 
 
 def get_env_time(env) -> torch.Tensor:
@@ -505,10 +519,10 @@ def obs_future_reference_preview(env) -> torch.Tensor:
     t_7 = current_time + (7 * step_dt)
 
     # Fetch reference states at respective times
-    _, _, ref_root_0, _, _ = loader.get_state(t_0)
-    ref_pos_1, _, _, _, _ = loader.get_state(t_1)
-    ref_pos_4, _, _, _, _ = loader.get_state(t_4)
-    ref_pos_7, _, _, _, _ = loader.get_state(t_7)
+    _, _, ref_root_0, _, _, _, _ = loader.get_state(t_0)
+    ref_pos_1, _, _, _, _, _, _ = loader.get_state(t_1)
+    ref_pos_4, _, _, _, _, _, _ = loader.get_state(t_4)
+    ref_pos_7, _, _, _, _, _, _ = loader.get_state(t_7)
 
     # qz^r(t) is the root z position
     qz_t = ref_root_0[:, 2:3]
@@ -521,7 +535,7 @@ def obs_future_reference_preview(env) -> torch.Tensor:
 def obs_jump_phase(env) -> torch.Tensor:
     """Returns the current jump phase as a one-hot policy observation."""
     phase = get_jump_phase(env)
-    phase_obs = torch.zeros((env.num_envs, JUMP_PHASE_COUNT), device=env.device)
+    phase_obs = torch.zeros((env.num_envs, len(JUMP_PHASES)), device=env.device)
     phase_obs.scatter_(1, phase.unsqueeze(-1), 1.0)
     return phase_obs
 
@@ -557,6 +571,7 @@ def reference_state_initialization(
         ref_joint_vel = loader.ref_joint_vel[random_frame_ids]
         ref_root_pos = loader.ref_root_pos[random_frame_ids]
         ref_root_vel = loader.ref_root_vel[random_frame_ids]
+        ref_root_ang_vel = loader.ref_root_ang_vel[random_frame_ids]
         ref_root_quat = loader.ref_root_quat[random_frame_ids]
 
         if loader.joint_ids is None:
@@ -571,12 +586,12 @@ def reference_state_initialization(
         init_joint_vel[:, loader.joint_ids] = ref_joint_vel
         init_root_pos = torch.zeros((len(rsi_env_ids), 3), device=env.device)
         env_origins = env.scene.env_origins[rsi_env_ids]
-        init_root_pos[:, :2] = env_origins[:, :2]  # Need to fix this line later
+        init_root_pos[:, :2] = env_origins[:, :2]  # Need to change in Stage 2&3
         init_root_pos[:, 2] = ref_root_pos[:, 2]
-        init_root_quat = convert_quat(ref_root_quat, to="xyzw")
-        init_root_pose = torch.cat([init_root_pos, init_root_quat], dim=-1)
+        init_root_pose = torch.cat([init_root_pos, ref_root_quat], dim=-1)
         init_root_vel = torch.zeros((len(rsi_env_ids), 6), device=env.device)
-        init_root_vel[:, :3] = ref_root_vel  # Put 0 for angular rate
+        init_root_vel[:, :3] = ref_root_vel
+        init_root_vel[:, 3:] = ref_root_ang_vel
 
         asset.write_joint_position_to_sim_index(
             position=init_joint_pos, env_ids=rsi_env_ids
@@ -625,11 +640,11 @@ def reference_state_initialization(
 # =============================================================================
 
 
-def track_joint_pos(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def track_joint_pos(env, gradient, phase_weights):
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    ref_joint_pos, _, _, _, _ = loader.get_state(current_time)
+    ref_joint_pos, _, _, _, _, _, _ = loader.get_state(current_time)
 
     if loader.joint_ids is None:
         joint_ids, _ = robot.find_joints(loader.joint_names, preserve_order=True)
@@ -638,26 +653,73 @@ def track_joint_pos(env, alpha, Tj, w_before, w_after, phase_weights=None):
     joint_pos = warp_to_torch(robot.data.joint_pos)
     current_joint_pos = joint_pos[:, loader.joint_ids]
 
-    r = get_reward(current_joint_pos, ref_joint_pos, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(current_joint_pos, ref_joint_pos, gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def track_pelvis_height(env, alpha, Tj, w_before, w_after, phase_weights=None):
-    current_time = get_env_time(env)
-    _, _, ref_root_pos, _, _ = get_loader(env).get_state(current_time)
-    cz = env.command_manager.get_command("jump_goal")[:, 2:3]
-    target_z = ref_root_pos[:, 2:3] + cz
-    current_z = warp_to_torch(env.scene["robot"].data.root_pos_w)[:, 2:3]
-
-    r = get_reward(current_z, target_z, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
-
-
-def track_foot_height(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def track_joint_vel(env, gradient, phase_weights):
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    _, _, _, _, ref_foot_height = loader.get_state(current_time)
+    _, ref_joint_vel, _, _, _, _, _ = loader.get_state(current_time)
+
+    if loader.joint_ids is None:
+        joint_ids, _ = robot.find_joints(loader.joint_names, preserve_order=True)
+        loader.joint_ids = torch.tensor(joint_ids, device=env.device)
+
+    joint_vel = warp_to_torch(robot.data.joint_vel)
+    current_joint_vel = joint_vel[:, loader.joint_ids]
+
+    r = get_reward(current_joint_vel, ref_joint_vel, gradient)
+    return r * get_phase_weight(env, phase_weights)
+
+
+def track_root_pos_z(env, gradient, phase_weights):
+    current_time = get_env_time(env)
+    _, _, ref_root_pos, _, _, _, _ = get_loader(env).get_state(current_time)
+    cz = env.command_manager.get_command("jump_goal")[:, 2:3]
+    ref_root_pos_z = ref_root_pos[:, 2:3] + cz
+    current_root_pos_z = warp_to_torch(env.scene["robot"].data.root_pos_w)[:, 2:3]
+
+    r = get_reward(current_root_pos_z, ref_root_pos_z, gradient)
+    return r * get_phase_weight(env, phase_weights)
+
+
+def track_root_vel_z(env, gradient, phase_weights):
+    current_time = get_env_time(env)
+    _, _, _, ref_root_vel, _, _, _ = get_loader(env).get_state(current_time)
+    ref_root_vel_z = ref_root_vel[:, 2:3]
+    current_root_vel_z = warp_to_torch(env.scene["robot"].data.root_lin_vel_w)[:, 2:3]
+
+    r = get_reward(current_root_vel_z, ref_root_vel_z, gradient)
+    return r * get_phase_weight(env, phase_weights)
+
+
+def track_root_orientation(env, gradient, phase_weights):
+    current_time = get_env_time(env)
+    _, _, _, _, ref_root_quat, _, _ = get_loader(env).get_state(current_time)
+    current_root_quat = warp_to_torch(env.scene["robot"].data.root_quat_w)
+    dot_product = torch.sum(current_root_quat * ref_root_quat, dim=-1, keepdim=True)
+    quat_error = 1.0 - torch.square(dot_product)
+
+    r = torch.exp(-gradient * quat_error).squeeze(-1)
+    return r * get_phase_weight(env, phase_weights)
+
+
+def track_root_angular_rate(env, gradient, phase_weights):
+    current_time = get_env_time(env)
+    _, _, _, _, _, ref_root_ang_vel, _ = get_loader(env).get_state(current_time)
+    current_root_ang_vel = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)
+
+    r = get_reward(current_root_ang_vel, ref_root_ang_vel, gradient)
+    return r * get_phase_weight(env, phase_weights)
+
+
+def track_foot_height(env, gradient, phase_weights):
+    loader = get_loader(env)
+    robot = env.scene["robot"]
+    current_time = get_env_time(env)
+    _, _, _, _, _, _, ref_foot_height = loader.get_state(current_time)
 
     if loader.foot_ids is None:
         foot_ids, _ = robot.find_bodies(
@@ -671,79 +733,89 @@ def track_foot_height(env, alpha, Tj, w_before, w_after, phase_weights=None):
     right_foot_z = body_pos_w[:, loader.foot_ids[1], 2].unsqueeze(1)
     current_foot_height = torch.cat((left_foot_z, right_foot_z), dim=1)
 
-    r = get_reward(current_foot_height, ref_foot_height, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(current_foot_height, ref_foot_height, gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def target_pelvis_position(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def target_position(env, gradient, phase_weights):
     current_xy = warp_to_torch(env.scene["robot"].data.root_pos_w)[:, :2]
     target_xy = env.command_manager.get_command("jump_goal")[:, :2]
 
-    r = get_reward(current_xy, target_xy, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(current_xy, target_xy, gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def target_pelvis_velocity(env, alpha, Tj, w_before, w_after, phase_weights=None):
-    current_time = get_env_time(env)
+def target_velocity(env, gradient, phase_weights):
     current_vel_xy = warp_to_torch(env.scene["robot"].data.root_lin_vel_w)[:, :2]
-    target_vel_xy = torch.where(
-        (current_time <= Tj).unsqueeze(-1),
-        env.command_manager.get_command("jump_goal")[:, :2] / Tj,
-        torch.zeros_like(current_vel_xy),
+    active_frames = sum(
+        end - start
+        for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values())
+        if weight != 0.0
+    )
+    active_duration_s = active_frames / REFERENCE_MOTION_FPS
+    if active_duration_s == 0:
+        return torch.zeros(env.num_envs, device=env.device)
+    target_vel_xy = (
+        env.command_manager.get_command("jump_goal")[:, :2] / active_duration_s
     )
 
-    r = get_reward(current_vel_xy, target_vel_xy, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(current_vel_xy, target_vel_xy, gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def target_orientation(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def target_orientation(env, gradient, phase_weights):
     current_quat = warp_to_torch(env.scene["robot"].data.root_quat_w)
     target_quat = env.command_manager.get_command("jump_goal")[:, 3:7]
     dot_product = torch.sum(current_quat * target_quat, dim=-1, keepdim=True)
     quat_error = 1.0 - torch.square(dot_product)
 
-    r = torch.exp(-alpha * quat_error).squeeze(-1)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = torch.exp(-gradient * quat_error).squeeze(-1)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def target_angular_rate(env, alpha, Tj, w_before, w_after, phase_weights=None):
-    current_time = get_env_time(env)
+def target_angular_rate(env, gradient, phase_weights):
     current_ang_vel = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)
     target_quat = env.command_manager.get_command("jump_goal")[:, 3:7]
     _, _, target_yaw = euler_xyz_from_quat(target_quat)
-    target_ang_vel = torch.zeros(env.num_envs, 3, device=env.device)
-    target_ang_vel[:, 2] = torch.where(
-        current_time <= Tj, target_yaw / Tj, torch.zeros_like(target_yaw)
+    active_frames = sum(
+        end - start
+        for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values())
+        if weight != 0.0
     )
+    active_duration_s = active_frames / REFERENCE_MOTION_FPS
+    if active_duration_s == 0:
+        return torch.zeros(env.num_envs, device=env.device)
+    target_ang_vel = torch.zeros(env.num_envs, 3, device=env.device)
+    target_ang_vel[:, 2] = target_yaw / active_duration_s
 
-    r = get_reward(current_ang_vel, target_ang_vel, alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(current_ang_vel, target_ang_vel, gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def penalize_ground_impact(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def penalize_ground_impact(env, gradient, phase_weights):
     net_forces_w = warp_to_torch(env.scene["contact_forces"].data.net_forces_w)
     net_contact_forces_z = net_forces_w[:, :, 2]
     fz_total = torch.sum(torch.abs(net_contact_forces_z), dim=1, keepdim=True)
-    r = get_reward(fz_total, torch.zeros_like(fz_total), alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(fz_total, torch.zeros_like(fz_total), gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def penalize_torque_consumption(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def penalize_torque_consumption(env, gradient, phase_weights):
     torques = warp_to_torch(env.scene["robot"].data.applied_torque)
-    r = get_reward(torques, torch.zeros_like(torques), alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(torques, torch.zeros_like(torques), gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def penalize_motor_velocity(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def penalize_joint_vel(env, gradient, phase_weights):
     joint_vel = warp_to_torch(env.scene["robot"].data.joint_vel)
-    r = get_reward(joint_vel, torch.zeros_like(joint_vel), alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(joint_vel, torch.zeros_like(joint_vel), gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
-def penalize_joint_acceleration(env, alpha, Tj, w_before, w_after, phase_weights=None):
+def penalize_joint_acc(env, gradient, phase_weights):
     accel = warp_to_torch(env.scene["robot"].data.joint_acc)
-    r = get_reward(accel, torch.zeros_like(accel), alpha)
-    return r * get_weight(env, Tj, w_before, w_after, phase_weights)
+    r = get_reward(accel, torch.zeros_like(accel), gradient)
+    return r * get_phase_weight(env, phase_weights)
 
 
 # =============================================================================
@@ -754,13 +826,13 @@ def penalize_joint_acceleration(env, alpha, Tj, w_before, w_after, phase_weights
 def foot_tracking_error(
     env,
     threshold: float,
-    active_phases: Sequence[int] | None = None,
+    active_phases: Sequence[str] | None = None,
 ) -> torch.Tensor:
     """Terminates if foot height tracking error exceeds the threshold."""
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    _, _, _, _, ref_foot_height = loader.get_state(current_time)
+    _, _, _, _, _, _, ref_foot_height = loader.get_state(current_time)
 
     if loader.foot_ids is None:
         foot_ids, _ = robot.find_bodies(
@@ -781,7 +853,7 @@ def foot_tracking_error(
         current_phase = get_jump_phase(env)
         active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
         for phase in active_phases:
-            active |= current_phase == phase
+            active |= current_phase == get_phase_id(phase)
         terminated &= active
 
     return terminated
@@ -791,7 +863,7 @@ def task_completion_error(
     env,
     pos_threshold: float,
     yaw_threshold: float,
-    start_phase: int = JUMP_PHASE_FINAL_STAND,
+    start_phase: str = "STAND",
 ) -> torch.Tensor:
     """Terminates if task error exceeds bounds once recovery should begin."""
     current_phase = get_jump_phase(env)
@@ -812,7 +884,7 @@ def task_completion_error(
     )
 
     error_exceeded = (pos_error > pos_threshold) | (yaw_error > yaw_threshold)
-    phase_exceeded = current_phase >= start_phase
+    phase_exceeded = current_phase >= get_phase_id(start_phase)
 
     return phase_exceeded & error_exceeded
 
@@ -950,57 +1022,74 @@ class G1JumpRewardsCfg:
     # Reference Motion Tracking
     track_joint_pos = RewTerm(
         func=track_joint_pos,
-        weight=2.0,
+        weight=1.0,
         params={
-            "alpha": 0.1745,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 15.0,
-            "w_after": 15.0,
+            "gradient": 0.1745,
             "phase_weights": (15.0, 15.0, 15.0, 10.0, 12.0, 15.0),
         },
     )
-    track_pelvis_height = RewTerm(
-        func=track_pelvis_height,
+    track_joint_vel = RewTerm(
+        func=track_joint_vel,
         weight=1.0,
         params={
-            "alpha": 65.85,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 5.0,
-            "w_after": 5.0,
+            "gradient": 0.01,
+            "phase_weights": (0.0, 4.0, 6.0, 6.0, 4.0, 1.0),
+        },
+    )
+    track_root_pos_z = RewTerm(
+        func=track_root_pos_z,
+        weight=1.0,
+        params={
+            "gradient": 65.85,
             "phase_weights": (5.0, 8.0, 8.0, 8.0, 5.0, 5.0),
+        },
+    )
+    track_root_vel_z = RewTerm(
+        func=track_root_vel_z,
+        weight=1.0,
+        params={
+            "gradient": 1.317,
+            "phase_weights": (0.0, 5.0, 10.0, 10.0, 5.0, 0.0),
+        },
+    )
+    track_root_orientation = RewTerm(
+        func=track_root_orientation,
+        weight=1.0,
+        params={
+            "gradient": 2.634,
+            "phase_weights": (0.0, 3.0, 2.0, 0.0, 3.0, 6.0),
+        },
+    )
+    track_root_angular_rate = RewTerm(
+        func=track_root_angular_rate,
+        weight=1.0,
+        params={
+            "gradient": 0.14,
+            "phase_weights": (0.0, 2.0, 3.0, 1.0, 3.0, 3.0),
         },
     )
     track_foot_height = RewTerm(
         func=track_foot_height,
         weight=1.0,
         params={
-            "alpha": 131.7,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 10.0,
-            "w_after": 10.0,
+            "gradient": 131.7,
             "phase_weights": (10.0, 10.0, 10.0, 12.0, 10.0, 10.0),
         },
     )
     # Task Completion
-    target_pelvis_position = RewTerm(
-        func=target_pelvis_position,
+    target_position = RewTerm(
+        func=target_position,
         weight=1.0,
         params={
-            "alpha": 21.07,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 12.5,
-            "w_after": 12.5,
+            "gradient": 21.07,
             "phase_weights": (3.0, 5.0, 8.0, 12.5, 12.5, 12.5),
         },
     )
-    target_pelvis_velocity = RewTerm(
-        func=target_pelvis_velocity,
+    target_velocity = RewTerm(
+        func=target_velocity,
         weight=1.0,
         params={
-            "alpha": 1.317,
-            "Tj": JUMP_LANDING_END_S,
-            "w_before": 0.0,
-            "w_after": 3.0,
+            "gradient": 1.317,
             "phase_weights": (0.0, 0.0, 3.0, 3.0, 1.0, 0.0),
         },
     )
@@ -1008,10 +1097,7 @@ class G1JumpRewardsCfg:
         func=target_orientation,
         weight=1.0,
         params={
-            "alpha": 2.634,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 0.0,
-            "w_after": 12.5,
+            "gradient": 2.634,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 6.0, 12.5),
         },
     )
@@ -1019,10 +1105,7 @@ class G1JumpRewardsCfg:
         func=target_angular_rate,
         weight=1.0,
         params={
-            "alpha": 0.14,
-            "Tj": JUMP_LANDING_END_S,
-            "w_before": 0.0,
-            "w_after": 3.0,
+            "gradient": 0.14,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 3.0, 6.0),
         },
     )
@@ -1031,10 +1114,7 @@ class G1JumpRewardsCfg:
         func=penalize_ground_impact,
         weight=1.0,
         params={
-            "alpha": 4.7e-8,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 5.0,
-            "w_after": 0.0,
+            "gradient": 4.7e-8,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 5.0, 0.0),
         },
     )
@@ -1042,32 +1122,23 @@ class G1JumpRewardsCfg:
         func=penalize_torque_consumption,
         weight=1.0,
         params={
-            "alpha": 6.9e-7,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 3.0,
-            "w_after": 3.0,
+            "gradient": 6.9e-7,
             "phase_weights": (1.0, 1.0, 0.5, 1.0, 3.0, 5.0),
         },
     )
-    penalize_motor_velocity = RewTerm(
-        func=penalize_motor_velocity,
+    penalize_joint_vel = RewTerm(
+        func=penalize_joint_vel,
         weight=1.0,
         params={
-            "alpha": 1.1e-4,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 0.0,
-            "w_after": 15.0,
+            "gradient": 1.1e-4,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 5.0, 15.0),
         },
     )
-    penalize_joint_acceleration = RewTerm(
-        func=penalize_joint_acceleration,
+    penalize_joint_acc = RewTerm(
+        func=penalize_joint_acc,
         weight=1.0,
         params={
-            "alpha": 2.8e-7,
-            "Tj": REFERENCE_DURATION_S,
-            "w_before": 3.0,
-            "w_after": 10.0,
+            "gradient": 2.8e-7,
             "phase_weights": (1.0, 1.0, 0.0, 0.0, 5.0, 10.0),
         },
     )
@@ -1099,13 +1170,7 @@ class G1JumpTerminationsCfg:
         func=foot_tracking_error,
         params={
             "threshold": 0.22,
-            "active_phases": (
-                JUMP_PHASE_STAND_PREP,
-                JUMP_PHASE_CROUCH,
-                JUMP_PHASE_TAKEOFF,
-                JUMP_PHASE_FLIGHT_PEAK,
-                JUMP_PHASE_LANDING,
-            ),
+            "active_phases": ("IDLE", "CROUCH", "TAKEOFF", "FLIGHT", "LAND"),
         },
     )
     task_completion_error = DoneTerm(
@@ -1113,7 +1178,7 @@ class G1JumpTerminationsCfg:
         params={
             "pos_threshold": 1.0,
             "yaw_threshold": 45.0 * (torch.pi / 180.0),
-            "start_phase": JUMP_PHASE_FINAL_STAND,
+            "start_phase": "STAND",
         },
     )
 
@@ -1131,7 +1196,7 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 10
         self.sim.dt = 0.002
-        self.episode_length_s = JUMP_EPISODE_LENGTH_S
+        self.episode_length_s = REFERENCE_DURATION_S
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         self.scene.contact_forces.update_period = self.sim.dt
@@ -1143,7 +1208,7 @@ class G1JumpEnvCfg_PLAY(G1JumpEnvCfg):
         super().__post_init__()
         self.scene.num_envs = 50
         self.scene.env_spacing = 2.5
-        self.episode_length_s = JUMP_EPISODE_LENGTH_S
+        self.episode_length_s = REFERENCE_DURATION_S
 
         if self.scene.terrain.terrain_generator is not None:
             self.scene.terrain.terrain_generator.num_rows = 5
