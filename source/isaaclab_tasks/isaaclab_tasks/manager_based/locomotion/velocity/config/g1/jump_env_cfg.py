@@ -333,12 +333,12 @@ def get_reward(u: torch.Tensor, v: torch.Tensor, gradient: float) -> torch.Tenso
 def get_jump_phase(env) -> torch.Tensor:
     """Returns the current reference jump phase for each environment."""
     current_time = get_env_time(env)
-    phase_starts = torch.tensor(
-        [start / REFERENCE_MOTION_FPS for start, _ in JUMP_PHASES.values()][1:],
+    phase_ends = torch.tensor(
+        [end / REFERENCE_MOTION_FPS for _, end in JUMP_PHASES.values()][1:],
         device=env.device,
         dtype=current_time.dtype,
     )
-    return torch.bucketize(current_time, phase_starts, right=True)
+    return torch.bucketize(current_time, phase_ends, right=False)
 
 
 def get_phase_weight(env, phase_weights: Sequence[float]) -> torch.Tensor:
@@ -978,6 +978,14 @@ class G1JumpObservationsCfg:
             func=mdp.root_lin_vel_w,
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
+        root_quat_w = ObsTerm(
+            func=mdp.root_quat_w,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+        root_ang_vel = ObsTerm(
+            func=mdp.root_ang_vel_w,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
         last_action = ObsTerm(
             func=mdp.last_action,
             params={"action_name": "joint_pos"},
@@ -1024,16 +1032,16 @@ class G1JumpRewardsCfg:
         func=track_joint_pos,
         weight=1.0,
         params={
-            "gradient": 0.1745,
-            "phase_weights": (15.0, 15.0, 15.0, 10.0, 12.0, 15.0),
+            "gradient": 0.15,
+            "phase_weights": (12.0, 16.0, 18.0, 12.0, 14.0, 16.0),
         },
     )
     track_joint_vel = RewTerm(
         func=track_joint_vel,
         weight=1.0,
         params={
-            "gradient": 0.01,
-            "phase_weights": (0.0, 4.0, 6.0, 6.0, 4.0, 1.0),
+            "gradient": 0.0046,
+            "phase_weights": (0.0, 4.0, 8.0, 6.0, 4.0, 1.0),
         },
     )
     track_root_pos_z = RewTerm(
@@ -1041,23 +1049,23 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 65.85,
-            "phase_weights": (5.0, 8.0, 8.0, 8.0, 5.0, 5.0),
+            "phase_weights": (4.0, 8.0, 12.0, 14.0, 10.0, 6.0),
         },
     )
     track_root_vel_z = RewTerm(
         func=track_root_vel_z,
         weight=1.0,
         params={
-            "gradient": 1.317,
-            "phase_weights": (0.0, 5.0, 10.0, 10.0, 5.0, 0.0),
+            "gradient": 2.634,
+            "phase_weights": (0.0, 6.0, 14.0, 10.0, 6.0, 0.0),
         },
     )
     track_root_orientation = RewTerm(
         func=track_root_orientation,
         weight=1.0,
         params={
-            "gradient": 2.634,
-            "phase_weights": (0.0, 3.0, 2.0, 0.0, 3.0, 6.0),
+            "gradient": 6.18,
+            "phase_weights": (4.0, 6.0, 4.0, 2.0, 8.0, 10.0),
         },
     )
     track_root_angular_rate = RewTerm(
@@ -1065,15 +1073,15 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 0.14,
-            "phase_weights": (0.0, 2.0, 3.0, 1.0, 3.0, 3.0),
+            "phase_weights": (0.0, 2.0, 4.0, 2.0, 4.0, 2.0),
         },
     )
     track_foot_height = RewTerm(
         func=track_foot_height,
         weight=1.0,
         params={
-            "gradient": 131.7,
-            "phase_weights": (10.0, 10.0, 10.0, 12.0, 10.0, 10.0),
+            "gradient": 58.53,
+            "phase_weights": (10.0, 12.0, 14.0, 16.0, 14.0, 10.0),
         },
     )
     # Task Completion
@@ -1082,7 +1090,7 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 21.07,
-            "phase_weights": (3.0, 5.0, 8.0, 12.5, 12.5, 12.5),
+            "phase_weights": (0.0, 1.0, 2.0, 4.0, 8.0, 12.0),
         },
     )
     target_velocity = RewTerm(
@@ -1097,8 +1105,8 @@ class G1JumpRewardsCfg:
         func=target_orientation,
         weight=1.0,
         params={
-            "gradient": 2.634,
-            "phase_weights": (0.0, 0.0, 0.0, 0.0, 6.0, 12.5),
+            "gradient": 13.87,
+            "phase_weights": (0.0, 0.0, 0.0, 1.0, 6.0, 12.0),
         },
     )
     target_angular_rate = RewTerm(
@@ -1106,7 +1114,7 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 0.14,
-            "phase_weights": (0.0, 0.0, 0.0, 0.0, 3.0, 6.0),
+            "phase_weights": (0.0, 0.0, 3.0, 3.0, 1.0, 0.0),
         },
     )
     # Smoothing
@@ -1115,31 +1123,31 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 4.7e-8,
-            "phase_weights": (0.0, 0.0, 0.0, 0.0, 5.0, 0.0),
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 8.0, 2.0),
         },
     )
     penalize_torque_consumption = RewTerm(
         func=penalize_torque_consumption,
         weight=1.0,
         params={
-            "gradient": 6.9e-7,
-            "phase_weights": (1.0, 1.0, 0.5, 1.0, 3.0, 5.0),
+            "gradient": 1.1e-6,
+            "phase_weights": (1.0, 1.0, 0.25, 0.5, 2.0, 4.0),
         },
     )
     penalize_joint_vel = RewTerm(
         func=penalize_joint_vel,
         weight=1.0,
         params={
-            "gradient": 1.1e-4,
-            "phase_weights": (0.0, 0.0, 0.0, 0.0, 5.0, 15.0),
+            "gradient": 1.3e-4,
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 4.0, 12.0),
         },
     )
     penalize_joint_acc = RewTerm(
         func=penalize_joint_acc,
         weight=1.0,
         params={
-            "gradient": 2.8e-7,
-            "phase_weights": (1.0, 1.0, 0.0, 0.0, 5.0, 10.0),
+            "gradient": 2.9e-7,
+            "phase_weights": (0.5, 0.5, 0.0, 0.0, 4.0, 8.0),
         },
     )
     # Termination
