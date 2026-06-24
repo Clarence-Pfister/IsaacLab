@@ -149,7 +149,30 @@ G1_23DOF_HOLO_COMPAT_ACTUATORS = {
 }
 G1_23DOF_HOLO_COMPAT_CFG = G1_MINIMAL_CFG.copy()
 G1_23DOF_HOLO_COMPAT_CFG.spawn.usd_path = G1_USD_PATH
+G1_23DOF_HOLO_COMPAT_CFG.spawn.activate_contact_sensors = True
 G1_23DOF_HOLO_COMPAT_CFG.actuators = G1_23DOF_HOLO_COMPAT_ACTUATORS
+
+CONTACT_SENSOR_PRIM_PATHS = {
+    "left_foot": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link/left_hip_yaw_link/left_knee_link/left_ankle_pitch_link/left_ankle_roll_link",
+    "right_foot": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link/right_hip_yaw_link/right_knee_link/right_ankle_pitch_link/right_ankle_roll_link",
+    "pelvis": "{ENV_REGEX_NS}/Robot/Geometry/pelvis",
+    "left_thigh": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link",
+    "left_shin": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link/left_hip_yaw_link/left_knee_link",
+    "right_thigh": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link",
+    "right_shin": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link/right_hip_yaw_link/right_knee_link",
+    "torso": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link",
+    "left_upper_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link",
+    "left_lower_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link/left_elbow_link",
+    "left_hand": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link/left_elbow_link/left_wrist_roll_rubber_hand",
+    "right_upper_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link",
+    "right_lower_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link/right_elbow_link",
+    "right_hand": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link/right_elbow_link/right_wrist_roll_rubber_hand",
+}
+CONTACT_SENSOR_NAMES = tuple(
+    f"contact_forces_{name}" for name in CONTACT_SENSOR_PRIM_PATHS
+)
+FOOT_CONTACT_SENSOR_NAMES = CONTACT_SENSOR_NAMES[:2]
+NON_FOOT_CONTACT_SENSOR_NAMES = CONTACT_SENSOR_NAMES[2:]
 
 # =============================================================================
 # UTILITY FUNCTIONS & MOTION LOADER
@@ -369,6 +392,13 @@ def warp_to_torch(warp_array):
         import warp
 
         return warp.to_torch(warp_array)
+
+
+def set_contact_sensor(prim_path: str) -> ContactSensorCfg:
+    return ContactSensorCfg(
+        prim_path=prim_path,
+        history_length=3,
+    )
 
 
 # =============================================================================
@@ -793,9 +823,14 @@ def target_angular_rate(env, gradient, phase_weights):
 
 
 def penalize_ground_impact(env, gradient, phase_weights):
-    net_forces_w = warp_to_torch(env.scene["contact_forces"].data.net_forces_w)
-    net_contact_forces_z = net_forces_w[:, :, 2]
-    fz_total = torch.sum(torch.abs(net_contact_forces_z), dim=1, keepdim=True)
+    fz_total = torch.zeros(env.num_envs, 1, device=env.device)
+    for sensor_name in FOOT_CONTACT_SENSOR_NAMES:
+        contact_sensor = env.scene.sensors[sensor_name]
+        forces = contact_sensor.data.net_forces_w
+        forces_t = warp_to_torch(forces)
+        fz_total += torch.sum(
+            torch.abs(forces_t[..., 2]).reshape(env.num_envs, -1), dim=1, keepdim=True
+        )
     r = get_reward(fz_total, torch.zeros_like(fz_total), gradient)
     return r * get_phase_weight(env, phase_weights)
 
@@ -821,6 +856,22 @@ def penalize_joint_acc(env, gradient, phase_weights):
 # =============================================================================
 # TERMINATION TERMS
 # =============================================================================
+
+
+def ground_contact(env, threshold: float, sensor_names: Sequence[str]) -> torch.Tensor:
+    """Terminates when any explicit non-foot contact sensor hits the ground."""
+    terminated = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
+
+    for sensor_name in sensor_names:
+        contact_sensor = env.scene.sensors[sensor_name]
+        forces = contact_sensor.data.net_forces_w_history
+        forces_t = warp_to_torch(forces)
+        force_norm = torch.linalg.norm(forces_t, dim=-1)
+        max_force = force_norm.reshape(env.num_envs, -1).max(dim=1).values
+        sensor_terminated = max_force > threshold
+        terminated |= sensor_terminated
+
+    return terminated
 
 
 def foot_tracking_error(
@@ -908,9 +959,43 @@ class G1JumpSceneCfg(InteractiveSceneCfg):
             joint_pos={r".*_joint": 0.0},
         ),
     )
-    contact_forces = ContactSensorCfg(
-        prim_path="{ENV_REGEX_NS}/Robot/Geometry/.*",
-        history_length=3,
+    contact_forces_left_foot = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_foot"]
+    )
+    contact_forces_right_foot = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_foot"]
+    )
+    contact_forces_pelvis = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["pelvis"])
+    contact_forces_left_thigh = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_thigh"]
+    )
+    contact_forces_left_shin = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_shin"]
+    )
+    contact_forces_right_thigh = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_thigh"]
+    )
+    contact_forces_right_shin = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_shin"]
+    )
+    contact_forces_torso = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["torso"])
+    contact_forces_left_upper_arm = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_upper_arm"]
+    )
+    contact_forces_left_lower_arm = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_lower_arm"]
+    )
+    contact_forces_left_hand = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["left_hand"]
+    )
+    contact_forces_right_upper_arm = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_upper_arm"]
+    )
+    contact_forces_right_lower_arm = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_lower_arm"]
+    )
+    contact_forces_right_hand = set_contact_sensor(
+        CONTACT_SENSOR_PRIM_PATHS["right_hand"]
     )
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -919,7 +1004,7 @@ class G1JumpSceneCfg(InteractiveSceneCfg):
 
     def __post_init__(self):
         self.sky_light.spawn = sim_utils.DomeLightCfg(intensity=750.0)
-        self.robot.spawn.articulation_props.enabled_self_collisions = True
+        self.robot.spawn.articulation_props.enabled_self_collisions = False
 
 
 @configclass
@@ -1158,13 +1243,10 @@ class G1JumpRewardsCfg:
 class G1JumpTerminationsCfg:
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
     base_contact = DoneTerm(
-        func=mdp.illegal_contact,
+        func=ground_contact,
         params={
-            "sensor_cfg": SceneEntityCfg(
-                "contact_forces",
-                body_names=r"^(?!.*_ankle_roll_link$).*",
-            ),
             "threshold": 1.0,
+            "sensor_names": NON_FOOT_CONTACT_SENSOR_NAMES,
         },
     )
     bad_orientation = DoneTerm(
@@ -1207,7 +1289,8 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
         self.episode_length_s = REFERENCE_DURATION_S
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
-        self.scene.contact_forces.update_period = self.sim.dt
+        for sensor_name in CONTACT_SENSOR_NAMES:
+            getattr(self.scene, sensor_name).update_period = self.sim.dt
 
 
 @configclass
