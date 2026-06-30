@@ -92,6 +92,31 @@ JOINT_NAMES = [
     "right_elbow_joint",
     "right_wrist_roll_joint",
 ]
+JOINT_ACTION_SCALES = {
+    "left_hip_pitch_joint": 0.85,
+    "left_hip_roll_joint": 0.18,
+    "left_hip_yaw_joint": 0.18,
+    "left_knee_joint": 1.00,
+    "left_ankle_pitch_joint": 0.35,
+    "left_ankle_roll_joint": 0.12,
+    "right_hip_pitch_joint": 0.85,
+    "right_hip_roll_joint": 0.18,
+    "right_hip_yaw_joint": 0.20,
+    "right_knee_joint": 1.00,
+    "right_ankle_pitch_joint": 0.35,
+    "right_ankle_roll_joint": 0.12,
+    "waist_yaw_joint": 0.00,
+    "left_shoulder_pitch_joint": 0.30,
+    "left_shoulder_roll_joint": 0.45,
+    "left_shoulder_yaw_joint": 0.30,
+    "left_elbow_joint": 0.45,
+    "left_wrist_roll_joint": 0.12,
+    "right_shoulder_pitch_joint": 0.30,
+    "right_shoulder_roll_joint": 0.35,
+    "right_shoulder_yaw_joint": 0.30,
+    "right_elbow_joint": 0.45,
+    "right_wrist_roll_joint": 0.12,
+}
 G1_23DOF_HOLO_COMPAT_ACTUATORS = {
     "legs": ImplicitActuatorCfg(
         joint_names_expr=[
@@ -262,10 +287,19 @@ class MotionLoader:
         )
         self.ref_root_ang_vel[1:] = axis_angle_from_quat(root_delta_quat) / motion_dt
 
-        # Foot Heights
-        foot_cols = ["left_foot_height", "right_foot_height"]
-        self.ref_foot_height = torch.tensor(
-            df[foot_cols].values, device=device, dtype=torch.float32
+        # Foot positions in the reference motion world frame.
+        foot_pos_cols = [
+            "left_foot_x",
+            "left_foot_y",
+            "left_foot_z",
+            "right_foot_x",
+            "right_foot_y",
+            "right_foot_z",
+        ]
+        self.ref_foot_pos = torch.tensor(
+            df[foot_pos_cols].values.reshape(-1, 2, 3),
+            device=device,
+            dtype=torch.float32,
         )
 
         self.length = self.ref_joint_pos.shape[0]
@@ -300,9 +334,9 @@ class MotionLoader:
         interp_root_pos = (1.0 - gradient) * self.ref_root_pos[
             idx_low
         ] + gradient * self.ref_root_pos[idx_high]
-        interp_foot_height = (1.0 - gradient) * self.ref_foot_height[
+        interp_foot_pos = (1.0 - gradient.unsqueeze(-1)) * self.ref_foot_pos[
             idx_low
-        ] + gradient * self.ref_foot_height[idx_high]
+        ] + gradient.unsqueeze(-1) * self.ref_foot_pos[idx_high]
         interp_root_quat = slerp_quat(
             self.ref_root_quat[idx_low], self.ref_root_quat[idx_high], gradient
         )
@@ -337,7 +371,7 @@ class MotionLoader:
             interp_root_vel,
             interp_root_quat,
             interp_root_ang_vel,
-            interp_foot_height,
+            interp_foot_pos,
         )
 
 
@@ -401,6 +435,31 @@ def set_contact_sensor(prim_path: str) -> ContactSensorCfg:
     )
 
 
+def get_current_foot_pos_w(env, loader: MotionLoader, robot) -> torch.Tensor:
+    """Returns current left/right foot positions in world frame."""
+    if loader.foot_ids is None:
+        foot_ids, _ = robot.find_bodies(
+            ["left_ankle_roll_link", "right_ankle_roll_link"],
+            preserve_order=True,
+        )
+        loader.foot_ids = torch.tensor(foot_ids, device=env.device)
+
+    body_pos_w = warp_to_torch(robot.data.body_pos_w)
+    return body_pos_w[:, loader.foot_ids, :]
+
+
+def get_root_relative_foot_pos(env, loader: MotionLoader, robot, current_time: torch.Tensor):
+    """Returns current and reference left/right foot positions relative to the root."""
+    _, _, ref_root_pos, _, _, _, ref_foot_pos = loader.get_state(current_time)
+
+    current_foot_pos = get_current_foot_pos_w(env, loader, robot)
+    current_root_pos = warp_to_torch(robot.data.root_pos_w).unsqueeze(1)
+
+    current_foot_pos_rel = current_foot_pos - current_root_pos
+    ref_foot_pos_rel = ref_foot_pos - ref_root_pos.unsqueeze(1)
+    return current_foot_pos_rel, ref_foot_pos_rel
+
+
 # =============================================================================
 # COMMAND TERM
 # =============================================================================
@@ -418,6 +477,7 @@ class JumpGoalCommand(CommandTerm):
         self.pose_command_b[:, 6] = 1.0
         self.pose_command_w = torch.zeros(self.num_envs, 7, device=self.device)
         self.pose_command_w[:, 6] = 1.0
+        self.target_displacement_w = torch.zeros(self.num_envs, 2, device=self.device)
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
@@ -471,6 +531,7 @@ class JumpGoalCommand(CommandTerm):
         )
         self.pose_command_w[env_ids, :3] = pos_w
         self.pose_command_w[env_ids, 3:] = quat_w
+        self.target_displacement_w[env_ids] = pos_w[:, :2] - current_root_pos[:, :2]
 
         # Query terrain height at the target (x, y) position and set cz accordingly
         self.pose_command_w[env_ids, 2] = self._query_terrain_height(
@@ -495,7 +556,7 @@ class JumpGoalCommand(CommandTerm):
             else:
                 current_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
         self.metrics["position_error"] = torch.linalg.norm(
-            self.pose_command_w[:, :3] - current_pos_w, dim=-1
+            self.pose_command_w[:, :2] - current_pos_w[:, :2], dim=-1
         )
 
     def _query_terrain_height(
@@ -745,25 +806,35 @@ def track_root_angular_rate(env, gradient, phase_weights):
     return r * get_phase_weight(env, phase_weights)
 
 
-def track_foot_height(env, gradient, phase_weights):
+def track_foot_z(env, gradient, phase_weights):
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    _, _, _, _, _, _, ref_foot_height = loader.get_state(current_time)
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
+        env, loader, robot, current_time
+    )
 
-    if loader.foot_ids is None:
-        foot_ids, _ = robot.find_bodies(
-            ["left_ankle_roll_link", "right_ankle_roll_link"],
-            preserve_order=True,
-        )
-        loader.foot_ids = torch.tensor(foot_ids, device=env.device)
+    r = get_reward(
+        current_foot_pos_rel[..., 2],
+        ref_foot_pos_rel[..., 2],
+        gradient,
+    )
+    return r * get_phase_weight(env, phase_weights)
 
-    body_pos_w = warp_to_torch(robot.data.body_pos_w)
-    left_foot_z = body_pos_w[:, loader.foot_ids[0], 2].unsqueeze(1)
-    right_foot_z = body_pos_w[:, loader.foot_ids[1], 2].unsqueeze(1)
-    current_foot_height = torch.cat((left_foot_z, right_foot_z), dim=1)
 
-    r = get_reward(current_foot_height, ref_foot_height, gradient)
+def track_foot_xy(env, gradient, phase_weights):
+    loader = get_loader(env)
+    robot = env.scene["robot"]
+    current_time = get_env_time(env)
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
+        env, loader, robot, current_time
+    )
+
+    r = get_reward(
+        current_foot_pos_rel[..., :2].reshape(env.num_envs, -1),
+        ref_foot_pos_rel[..., :2].reshape(env.num_envs, -1),
+        gradient,
+    )
     return r * get_phase_weight(env, phase_weights)
 
 
@@ -785,9 +856,10 @@ def target_velocity(env, gradient, phase_weights):
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:
         return torch.zeros(env.num_envs, device=env.device)
-    target_vel_xy = (
-        env.command_manager.get_command("jump_goal")[:, :2] / active_duration_s
-    )
+    target_displacement_xy = env.command_manager.get_term(
+        "jump_goal"
+    ).target_displacement_w
+    target_vel_xy = target_displacement_xy / active_duration_s
 
     r = get_reward(current_vel_xy, target_vel_xy, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -879,25 +951,15 @@ def foot_tracking_error(
     threshold: float,
     active_phases: Sequence[str] | None = None,
 ) -> torch.Tensor:
-    """Terminates if foot height tracking error exceeds the threshold."""
+    """Terminates if root-relative foot position error exceeds the threshold."""
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    _, _, _, _, _, _, ref_foot_height = loader.get_state(current_time)
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
+        env, loader, robot, current_time
+    )
 
-    if loader.foot_ids is None:
-        foot_ids, _ = robot.find_bodies(
-            ["left_ankle_roll_link", "right_ankle_roll_link"],
-            preserve_order=True,
-        )
-        loader.foot_ids = torch.tensor(foot_ids, device=env.device)
-
-    body_pos_w = warp_to_torch(robot.data.body_pos_w)
-    left_foot_z = body_pos_w[:, loader.foot_ids[0], 2].unsqueeze(1)
-    right_foot_z = body_pos_w[:, loader.foot_ids[1], 2].unsqueeze(1)
-    current_foot_height = torch.cat((left_foot_z, right_foot_z), dim=1)
-
-    error = torch.abs(current_foot_height - ref_foot_height)
+    error = torch.linalg.norm(current_foot_pos_rel - ref_foot_pos_rel, dim=-1)
     terminated = torch.any(error > threshold, dim=-1)
 
     if active_phases is not None:
@@ -1038,7 +1100,7 @@ class G1JumpActionsCfg:
     joint_pos = mdp.JointPositionActionCfg(
         asset_name="robot",
         joint_names=JOINT_NAMES,
-        scale=0.5,
+        scale=JOINT_ACTION_SCALES,
         use_default_offset=True,
     )
 
@@ -1126,7 +1188,7 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 0.0046,
-            "phase_weights": (0.0, 4.0, 8.0, 6.0, 4.0, 1.0),
+            "phase_weights": (0.0, 1.0, 2.0, 2.0, 1.0, 0.0),
         },
     )
     track_root_pos_z = RewTerm(
@@ -1161,12 +1223,20 @@ class G1JumpRewardsCfg:
             "phase_weights": (0.0, 2.0, 4.0, 2.0, 4.0, 2.0),
         },
     )
-    track_foot_height = RewTerm(
-        func=track_foot_height,
+    track_foot_z = RewTerm(
+        func=track_foot_z,
         weight=1.0,
         params={
             "gradient": 58.53,
             "phase_weights": (10.0, 12.0, 14.0, 16.0, 14.0, 10.0),
+        },
+    )
+    track_foot_xy = RewTerm(
+        func=track_foot_xy,
+        weight=1.0,
+        params={
+            "gradient": 30.0,
+            "phase_weights": (8.0, 12.0, 14.0, 6.0, 14.0, 12.0),
         },
     )
     # Task Completion
@@ -1191,7 +1261,7 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 13.87,
-            "phase_weights": (0.0, 0.0, 0.0, 1.0, 6.0, 12.0),
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         },
     )
     target_angular_rate = RewTerm(
@@ -1199,7 +1269,7 @@ class G1JumpRewardsCfg:
         weight=1.0,
         params={
             "gradient": 0.14,
-            "phase_weights": (0.0, 0.0, 3.0, 3.0, 1.0, 0.0),
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         },
     )
     # Smoothing
@@ -1236,7 +1306,7 @@ class G1JumpRewardsCfg:
         },
     )
     # Termination
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-200.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-50.0)
 
 
 @configclass
@@ -1259,7 +1329,7 @@ class G1JumpTerminationsCfg:
     foot_tracking_error = DoneTerm(
         func=foot_tracking_error,
         params={
-            "threshold": 0.22,
+            "threshold": 0.50,
             "active_phases": ("IDLE", "CROUCH", "TAKEOFF", "FLIGHT", "LAND"),
         },
     )
