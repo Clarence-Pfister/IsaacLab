@@ -55,6 +55,15 @@ class G1FlatPPORunnerCfg(G1RoughPPORunnerCfg):
 
 
 @configclass
+class G1StandPPORunnerCfg(G1FlatPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.max_iterations = 1000
+        self.experiment_name = "g1_stand"
+
+
+@configclass
 class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()

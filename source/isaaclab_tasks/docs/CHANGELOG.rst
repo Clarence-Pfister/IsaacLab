@@ -1,6 +1,16 @@
 Changelog
 ---------
 
+1.5.12 (2026-07-07)
+~~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added the ``Isaac-Velocity-Stand-G1-v0`` environment for training a stationary
+  Unitree G1 29-DOF policy.
+
+
 1.5.11 (2026-03-13)
 ~~~~~~~~~~~~~~~~~~~
 
