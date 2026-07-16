@@ -75,7 +75,7 @@ custom arguments and those from :class:`~app.AppLauncher`.
    [INFO] Using python from: /isaac-sim/python.sh
    [INFO][AppLauncher]: The argument 'width' will be used to configure the SimulationApp.
    [INFO][AppLauncher]: The argument 'height' will be used to configure the SimulationApp.
-   usage: launch_app.py [-h] [--size SIZE] [--width WIDTH] [--height HEIGHT] [--headless] [--livestream {0,1,2}]
+   usage: launch_app.py [-h] [--size SIZE] [--width WIDTH] [--height HEIGHT] [--livestream {0,1,2}]
                         [--enable_cameras] [--visualizer VISUALIZER] [--verbose] [--experience EXPERIENCE]
 
    Tutorial on running IsaacSim via the AppLauncher.
@@ -87,7 +87,7 @@ custom arguments and those from :class:`~app.AppLauncher`.
    --height HEIGHT       Height of the viewport and generated images. Defaults to 720
 
    app_launcher arguments:
-   --headless            [DEPRECATED] Disable visualizers and force headless mode (display off).
+            [DEPRECATED] Disable visualizers and force headless mode (display off).
    --livestream {0,1,2}
                          Force enable livestreaming. Mapping corresponds to that for the "LIVESTREAM" environment variable.
    --enable_cameras      Enable cameras when running without a GUI.
@@ -114,8 +114,7 @@ for more examples.
 Using environment variables
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-As noted in the help message, the :class:`~app.AppLauncher` arguments (for example ``--livestream``
-and deprecated ``--headless``)
+As noted in the help message, the :class:`~app.AppLauncher` arguments (for example ``--livestream``)
 have corresponding environment variables (envar) as well. These are detailed in :mod:`isaaclab.app`
 documentation. Providing any of these arguments through CLI is equivalent to running the script in a shell
 environment where the corresponding envar is set.
@@ -128,7 +127,7 @@ as we will demonstrate later in this tutorial.
 These arguments can be used with any script that starts the simulation using :class:`~app.AppLauncher`,
 with one exception, ``--enable_cameras``. This setting sets the rendering pipeline to use the
 offscreen renderer. However, this setting is only compatible with the :class:`isaaclab.sim.SimulationContext`.
-It will not work with Isaac Sim's :class:`isaacsim.core.api.simulation_context.SimulationContext` class.
+It will not work with Isaac Sim's legacy ``SimulationContext`` from deprecated Isaac Sim core extensions.
 For more information on this flag, please see the :class:`~app.AppLauncher` API documentation.
 
 
@@ -178,5 +177,5 @@ For more details on headless mode and launching visualizers, see
 :doc:`/source/migration/migrating_to_isaaclab_3-0`.
 
 
-.. _specification: https://docs.isaacsim.omniverse.nvidia.com/latest/py/source/extensions/isaacsim.simulation_app/docs/index.html#isaacsim.simulation_app.SimulationApp.DEFAULT_LAUNCHER_CONFIG
+.. _specification: https://docs.isaacsim.omniverse.nvidia.com/latest/py/source/extensions/isaacsim.simulation_app/docs/api.html#isaacsim.simulation_app.SimulationApp.DEFAULT_LAUNCHER_CONFIG
 .. _WebRTC Livestreaming: https://docs.isaacsim.omniverse.nvidia.com/latest/installation/manual_livestream_clients.html#isaac-sim-short-webrtc-streaming-client

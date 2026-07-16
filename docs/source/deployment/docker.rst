@@ -102,6 +102,20 @@ The following shows how to launch the container in a detached state and enter it
     # We pass 'base' explicitly, but if we hadn't it would default to 'base'
     ./docker/container.py enter base
 
+The Isaac Lab base, ROS 2, and cuRobo images run as a non-root user with uid/gid 1000 to keep
+bind-mounted workspaces writable on GitHub runners. If you run one of these images directly with
+``docker run`` and your host uid differs, pass Docker's ``--user "$(id -u):1000"`` option so
+new files on bind mounts are owned by your host user while retaining runtime-home access.
+
+If you are upgrading an existing Compose setup from older root-based images, recreate the named
+volumes before starting the new images. Older cache, log, and data volumes may contain root-owned
+files that the uid/gid 1000 runtime user cannot update. Copy any artifacts you want to keep, then
+remove the old Compose volumes from the ``docker`` directory:
+
+.. code:: bash
+
+    docker compose --file docker-compose.yaml --profile base --env-file .env.base down --volumes
+
 To copy files from the base container to the host machine, you can use the following command:
 
 .. code:: bash
@@ -308,7 +322,22 @@ To pull the minimal Isaac Lab container, run:
 
 .. code:: bash
 
-  docker pull nvcr.io/nvidia/isaac-lab:3.0.0-beta1
+  docker pull nvcr.io/nvidia/isaac-lab:3.0.0-beta2
+
+.. attention::
+
+  If the pre-built image you use runs as a **non-root** user (uid/gid 1000) -- as Isaac Lab
+  3.0.0-beta2 and later do -- the bind-mounted host directories below must be writable by that
+  user. Docker creates any missing bind-mount source directory as ``root``, which the non-root
+  runtime user cannot write to, leading to startup errors such as
+  ``PermissionError: [Errno 13] Permission denied: '/root/.local/share/ov/data/exts'``.
+  Pre-create the host directories and make them writable by uid/gid 1000 before running the
+  container:
+
+  .. code:: bash
+
+     mkdir -p ~/docker/isaac-sim/{cache/kit,cache/ov,cache/pip,cache/glcache,cache/computecache,logs,data,documents}
+     sudo chown -R 1000:1000 ~/docker/isaac-sim
 
 To run the Isaac Lab container with an interactive bash session, run:
 
@@ -324,7 +353,7 @@ To run the Isaac Lab container with an interactive bash session, run:
      -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \
      -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \
      -v ~/docker/isaac-sim/documents:/root/Documents:rw \
-     nvcr.io/nvidia/isaac-lab:3.0.0-beta1
+     nvcr.io/nvidia/isaac-lab:3.0.0-beta2
 
 To enable rendering through X11 forwarding, run:
 
@@ -343,13 +372,13 @@ To enable rendering through X11 forwarding, run:
      -v ~/docker/isaac-sim/logs:/root/.nvidia-omniverse/logs:rw \
      -v ~/docker/isaac-sim/data:/root/.local/share/ov/data:rw \
      -v ~/docker/isaac-sim/documents:/root/Documents:rw \
-     nvcr.io/nvidia/isaac-lab:3.0.0-beta1
+     nvcr.io/nvidia/isaac-lab:3.0.0-beta2
 
 To run an example within the container, run:
 
 .. code:: bash
 
-  ./isaaclab.sh -p scripts/tutorials/00_sim/log_time.py --headless
+  ./isaaclab.sh -p scripts/tutorials/00_sim/log_time.py
 
 
 .. _`NVIDIA Software License Agreement`: https://www.nvidia.com/en-us/agreements/enterprise-software/nvidia-software-license-agreement

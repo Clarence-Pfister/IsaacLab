@@ -17,105 +17,10 @@ from typing import TYPE_CHECKING
 import gymnasium as gym
 import yaml
 
+from isaaclab_tasks.utils.hydra import resolve_presets
+
 if TYPE_CHECKING:
     from isaaclab.envs import DirectRLEnvCfg, ManagerBasedRLEnvCfg
-
-
-def _is_preset_cfg(obj: object) -> bool:
-    """Return True if *obj* is an instance of a PresetCfg subclass (new typed-field style).
-
-    Uses MRO class-name matching so that this module has no dependency on the
-    hydra-gated ``isaaclab_tasks.utils.hydra`` import path.
-    """
-    return any(cls.__name__ == "PresetCfg" for cls in type(obj).__mro__)
-
-
-def _is_old_style_preset(obj: object) -> bool:
-    """Return True if *obj* is an old-style preset wrapper (has ``presets`` dict with a ``'default'`` key)."""
-    presets = getattr(obj, "presets", None)
-    return hasattr(obj, "__dataclass_fields__") and isinstance(presets, dict) and "default" in presets
-
-
-def _resolve_presets_to_default(cfg: object) -> object:
-    """Recursively replace preset wrapper fields with their *default* preset.
-
-    Handles two preset patterns used in IsaacLab task configs:
-
-    * **New style** (``PresetCfg`` subclass): typed fields where ``default`` is a class attribute.
-    * **Old style** (``presets`` dict): configclass with ``presets: dict[str, Cfg]`` and a ``'default'`` key.
-
-    Both are resolved in-place so the config can be used without a Hydra CLI override (e.g. in tests).
-    """
-    if not hasattr(cfg, "__dataclass_fields__"):
-        return cfg
-    for field_name in list(cfg.__dataclass_fields__):
-        value = getattr(cfg, field_name, None)
-        if value is None:
-            continue
-        if hasattr(value, "__dataclass_fields__"):
-            if _is_preset_cfg(value):
-                resolved = value.default
-                setattr(cfg, field_name, resolved)
-                _resolve_presets_to_default(resolved)
-            elif _is_old_style_preset(value):
-                resolved = value.presets["default"]
-                setattr(cfg, field_name, resolved)
-                _resolve_presets_to_default(resolved)
-            else:
-                _resolve_presets_to_default(value)
-        elif isinstance(value, dict):
-            for dict_val in value.values():
-                if hasattr(dict_val, "__dataclass_fields__"):
-                    _resolve_presets_to_default(dict_val)
-    return cfg
-
-
-def apply_named_preset(env_cfg: object, raw_cfg: object, preset_name: str) -> None:
-    """Apply a named preset to all preset-wrapper fields in *env_cfg*, guided by *raw_cfg*.
-
-    Walks *raw_cfg* to find preset wrappers (both :class:`PresetCfg` subclasses and
-    old-style wrappers with a ``presets`` dict). For each wrapper that contains
-    *preset_name*, overrides the corresponding already-resolved field in *env_cfg*.
-
-    This is used in tests to apply a non-default physics preset (e.g. ``'newton'``)
-    after :func:`parse_env_cfg` has already resolved all wrappers to ``'default'``.
-
-    Args:
-        env_cfg: Resolved env config (from :func:`parse_env_cfg`) to update in-place.
-        raw_cfg: Raw env config (from :func:`load_cfg_from_registry`) with preset
-            wrappers still intact.
-        preset_name: Name of the preset to apply (e.g., ``'newton'``).
-    """
-    if not hasattr(raw_cfg, "__dataclass_fields__"):
-        return
-    for field_name in raw_cfg.__dataclass_fields__:
-        raw_value = getattr(raw_cfg, field_name, None)
-        if raw_value is None:
-            continue
-        if hasattr(raw_value, "__dataclass_fields__"):
-            if _is_preset_cfg(raw_value):
-                if hasattr(raw_value, preset_name):
-                    resolved = getattr(raw_value, preset_name)
-                    setattr(env_cfg, field_name, resolved)
-                    apply_named_preset(resolved, resolved, preset_name)
-            elif _is_old_style_preset(raw_value):
-                if preset_name in raw_value.presets:
-                    resolved = raw_value.presets[preset_name]
-                    setattr(env_cfg, field_name, resolved)
-                    apply_named_preset(resolved, resolved, preset_name)
-            else:
-                env_value = getattr(env_cfg, field_name, None)
-                if env_value is not None and hasattr(env_value, "__dataclass_fields__"):
-                    apply_named_preset(env_value, raw_value, preset_name)
-        elif isinstance(raw_value, dict):
-            env_dict = getattr(env_cfg, field_name, None)
-            if not isinstance(env_dict, dict):
-                continue
-            for key, raw_dict_val in raw_value.items():
-                if hasattr(raw_dict_val, "__dataclass_fields__") and key in env_dict:
-                    env_dict_val = env_dict[key]
-                    if hasattr(env_dict_val, "__dataclass_fields__"):
-                        apply_named_preset(env_dict_val, raw_dict_val, preset_name)
 
 
 def load_cfg_from_registry(task_name: str, entry_point_key: str) -> dict | object:
@@ -246,17 +151,12 @@ def parse_env_cfg(
     if isinstance(cfg, dict):
         raise RuntimeError(f"Configuration for the task: '{task_name}' is not a class. Please provide a class.")
 
-    # If the top-level cfg is itself a PresetCfg wrapper, resolve to the default preset before
-    # attempting any attribute access (e.g. cfg.sim, cfg.scene).
-    if _is_preset_cfg(cfg):
-        cfg = cfg.default
-
     # Resolve any PresetCfg wrappers to their default preset so the config
     # is usable without a Hydra CLI override (e.g. in tests).
     # Must happen BEFORE attribute overrides, otherwise overrides on PresetCfg wrapper
     # fields (e.g. cfg.scene when scene is a PresetCfg) get discarded when the wrapper
     # is replaced by its .default.
-    _resolve_presets_to_default(cfg)
+    cfg = resolve_presets(cfg)
 
     # simulation device
     cfg.sim.device = device
@@ -271,7 +171,12 @@ def parse_env_cfg(
 
 
 def get_checkpoint_path(
-    log_path: str, run_dir: str = ".*", checkpoint: str = ".*", other_dirs: list[str] = None, sort_alpha: bool = True
+    log_path: str,
+    run_dir: str = ".*",
+    checkpoint: str = ".*",
+    other_dirs: list[str] = None,
+    sort_alpha: bool = True,
+    preferred_checkpoint: str | None = None,
 ) -> str:
     """Get path to the model checkpoint in input directory.
 
@@ -287,10 +192,15 @@ def get_checkpoint_path(
             recent directory created inside :attr:`log_path`.
         other_dirs: The intermediate directories between the run directory and the checkpoint file. Defaults to
             None, which implies that checkpoint file is directly under the run directory.
-        checkpoint: The regex expression for the model checkpoint file. Defaults to the most recent
-            torch-model saved in the :attr:`run_dir` directory.
+        checkpoint: The regex expression for the model checkpoint file. Defaults to ``".*"``, which matches all
+            checkpoints and selects the most recent one.
         sort_alpha: Whether to sort the runs by alphabetical order. Defaults to True.
             If False, the folders in :attr:`run_dir` are sorted by the last modified time.
+        preferred_checkpoint: An optional regex expression that is matched before :attr:`checkpoint`. When it is
+            provided and matches at least one file, that match is used; otherwise resolution falls back to
+            :attr:`checkpoint`. This allows preferring a specific checkpoint (e.g. the best or final model) while
+            still resolving the latest available checkpoint when the preferred file has not been written yet (e.g.
+            for short runs). Defaults to None, which matches :attr:`checkpoint` directly.
 
     Returns:
         The path to the model checkpoint.
@@ -319,13 +229,22 @@ def get_checkpoint_path(
     except IndexError:
         raise ValueError(f"No runs present in the directory: '{log_path}' match: '{run_dir}'.")
 
-    # list all model checkpoints in the directory
-    model_checkpoints = [f for f in os.listdir(run_path) if re.match(checkpoint, f)]
+    # prefer ``preferred_checkpoint`` when given and it matches; otherwise fall back to the general
+    # ``checkpoint`` pattern (e.g. resolve the latest numbered checkpoint when the preferred best/final
+    # checkpoint file has not been written yet)
+    model_checkpoints = []
+    if preferred_checkpoint is not None:
+        model_checkpoints = [f for f in os.listdir(run_path) if re.match(preferred_checkpoint, f)]
+    if len(model_checkpoints) == 0:
+        model_checkpoints = [f for f in os.listdir(run_path) if re.match(checkpoint, f)]
     # check if any checkpoints are present
     if len(model_checkpoints) == 0:
-        raise ValueError(f"No checkpoints in the directory: '{run_path}' match '{checkpoint}'.")
-    # sort alphabetically while ensuring that *_10 comes after *_9
-    model_checkpoints.sort(key=lambda m: f"{m:0>15}")
+        patterns = f"'{checkpoint}'"
+        if preferred_checkpoint is not None:
+            patterns = f"'{preferred_checkpoint}' nor '{checkpoint}'"
+        raise ValueError(f"No checkpoints in the directory: '{run_path}' match {patterns}.")
+    # sort naturally so numbered checkpoints such as *_10 come after *_9 even with long filename prefixes
+    model_checkpoints.sort(key=lambda m: [int(token) if token.isdigit() else token for token in re.split(r"(\d+)", m)])
     # get latest matched checkpoint file
     checkpoint_file = model_checkpoints[-1]
 

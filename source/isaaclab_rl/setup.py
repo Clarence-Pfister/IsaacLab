@@ -26,12 +26,18 @@ INSTALL_REQUIRES = [
     # configuration management
     "hydra-core",
     # data collection
-    "h5py",
+    "h5py>=3.16.0",
     # basic logger
     "tensorboard",
     # video recording
-    "moviepy",
-    "packaging<24",
+    # moviepy bounded to the 1.x line: stable 2.x caps pillow<12 (conflicts with the floor
+    # below), and prerelease-allowing resolvers otherwise fall through to the broken
+    # 2.0.0.dev2 build whose write_videofile crashes video recording.
+    "moviepy>=1.0.3,<2.0.0.dev0",
+    # pillow floor: without it, standalone isaaclab_rl installs let moviepy 2.x (pillow<12 cap)
+    # downgrade pillow and delete Isaac Sim's prebundled copy (nvbugs 6410989).
+    "pillow>=12.1.1",
+    "packaging",
     "tqdm==4.67.1",  # previous version was causing sys errors
 ]
 
@@ -40,7 +46,7 @@ PYTORCH_INDEX_URL = ["https://download.pytorch.org/whl/cu128"]
 # Extra dependencies for RL agents
 EXTRAS_REQUIRE = {
     "sb3": ["stable-baselines3>=2.6", "tqdm", "rich"],  # tqdm/rich for progress bar
-    "skrl": ["skrl>=1.4.3"],
+    "skrl": ["skrl>=2.1.0"],
     "rl-games": [
         "aiohttp==3.13.3",
         "rl-games @ git+https://github.com/isaac-sim/rl_games.git@python3.11",
@@ -69,17 +75,14 @@ setup(
     keywords=EXTENSION_TOML_DATA["package"]["keywords"],
     include_package_data=True,
     package_data={"": ["*.pyi"]},
-    python_requires=">=3.10",
+    python_requires=">=3.12",
     install_requires=INSTALL_REQUIRES,
     dependency_links=PYTORCH_INDEX_URL,
     extras_require=EXTRAS_REQUIRE,
     packages=["isaaclab_rl"],
     classifiers=[
         "Natural Language :: English",
-        "Programming Language :: Python :: 3.11",
         "Programming Language :: Python :: 3.12",
-        "Isaac Sim :: 5.0.0",
-        "Isaac Sim :: 5.1.0",
         "Isaac Sim :: 6.0.0",
     ],
     zip_safe=False,

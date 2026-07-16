@@ -5,7 +5,6 @@
 import os
 import tempfile
 
-import torch
 from isaaclab_physx.physics import PhysxCfg
 from isaaclab_teleop.isaac_teleop_cfg import IsaacTeleopCfg
 from isaaclab_teleop.xr_cfg import XrCfg
@@ -24,8 +23,8 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim.schemas.schemas_cfg import MassPropertiesCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg, UsdFileCfg
-from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR, retrieve_file_path
+from isaaclab.utils.configclass import configclass
 
 from . import mdp
 
@@ -398,14 +397,14 @@ class ActionsCfg:
             fail_on_joint_limit_violation=False,
             variable_input_tasks=[
                 FrameTaskCfg(
-                    frame="g1_29dof_rev_1_0_left_wrist_yaw_link",
+                    frame="left_wrist_yaw_link",
                     position_cost=8.0,  # [cost] / [m]
                     orientation_cost=2.0,  # [cost] / [rad]
                     lm_damping=10,  # dampening for solver for step jumps
                     gain=0.5,
                 ),
                 FrameTaskCfg(
-                    frame="g1_29dof_rev_1_0_right_wrist_yaw_link",
+                    frame="right_wrist_yaw_link",
                     position_cost=8.0,  # [cost] / [m]
                     orientation_cost=2.0,  # [cost] / [rad]
                     lm_damping=10,  # dampening for solver for step jumps
@@ -415,8 +414,8 @@ class ActionsCfg:
                     cost=0.5,
                     lm_damping=1,
                     controlled_frames=[
-                        "g1_29dof_rev_1_0_left_wrist_yaw_link",
-                        "g1_29dof_rev_1_0_right_wrist_yaw_link",
+                        "left_wrist_yaw_link",
+                        "right_wrist_yaw_link",
                     ],
                     controlled_joints=[
                         "left_shoulder_pitch_joint",
@@ -534,49 +533,47 @@ class PickPlaceG1InspireFTPEnvCfg(ManagerBasedRLEnvCfg):
     # Idle action to hold robot in default pose
     # Action format: [left arm pos (3), left arm quat (4), right arm pos (3), right arm quat (4),
     #                 left hand joint pos (12), right hand joint pos (12)]
-    idle_action = torch.tensor(
-        [
-            # 14 hand joints for EEF control
-            -0.1487,
-            0.2038,
-            1.0952,
-            0.0,
-            0.0,
-            0.707,
-            0.707,
-            0.1487,
-            0.2038,
-            1.0952,
-            0.0,
-            0.0,
-            0.707,
-            0.707,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-        ]
-    )
+    idle_action = [
+        # 14 hand joints for EEF control
+        -0.1487,
+        0.2038,
+        1.0952,
+        0.0,
+        0.0,
+        0.707,
+        0.707,
+        0.1487,
+        0.2038,
+        1.0952,
+        0.0,
+        0.0,
+        0.707,
+        0.707,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    ]
 
     def __post_init__(self):
         """Post initialization."""

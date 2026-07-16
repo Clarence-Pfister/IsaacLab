@@ -5,6 +5,10 @@ Augmented Imitation Learning
 
 This section describes how to use Isaac Lab's imitation learning capabilities with the visual augmentation capabilities of `Cosmos <https://www.nvidia.com/en-us/ai/cosmos/>`_ models to generate demonstrations at scale to train visuomotor policies robust against visual variations.
 
+
+.. important::
+   The `Cosmos Transfer1 <https://github.com/nvidia-cosmos/cosmos-transfer1/tree/e4055e39ee9c53165e85275bdab84ed20909714a>`_ model used in this tutorial is `supported <https://huggingface.co/nvidia/Cosmos-Transfer1-7B#software-integration>`_ on Ampere and Hopper GPUs.
+
 Generating Demonstrations
 ~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -21,7 +25,7 @@ In the following example, we will show you how to use Isaac Lab Mimic to generat
 .. code:: bash
 
     ./isaaclab.sh -p scripts/imitation_learning/isaaclab_mimic/generate_dataset.py \
-    --device cpu --enable_cameras --headless --num_envs 10 --generation_num_trials 1000 \
+    --device cpu --enable_cameras --num_envs 10 --generation_num_trials 1000 \
     --input_file ./datasets/annotated_dataset.hdf5 --output_file ./datasets/mimic_dataset_1k.hdf5 \
     --task Isaac-Stack-Cube-Franka-IK-Rel-Visuomotor-Cosmos-Mimic-v0 \
     --rendering_mode performance
@@ -308,7 +312,7 @@ Using the generated data, we can now train a visuomotor BC agent for ``Isaac-Sta
     --name bc_rnn_image_franka_stack_mimic_cosmos
 
 .. note::
-   By default the trained models and logs will be saved to ``IssacLab/logs/robomimic``.
+   By default the trained models and logs will be saved to ``IsaacLab/logs/robomimic``.
 
 Evaluation
 ^^^^^^^^^^
@@ -390,6 +394,9 @@ Example usage for the cube stacking task:
     --seeds 0 \
     --num_rollouts 15 \
     --rendering_mode performance
+
+.. tip::
+   Verify that the models directory is not empty. By default, the training script saves models every 20 epochs starting from epoch 100.
 
 .. note::
    This script can take over a day or even longer to run (depending on the hardware being used). This behavior is expected.

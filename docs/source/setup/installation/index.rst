@@ -3,12 +3,12 @@
 Local Installation
 ==================
 
-.. image:: https://img.shields.io/badge/IsaacSim-6.0.0-silver.svg
+.. image:: https://img.shields.io/badge/IsaacSim-6.0.1-silver.svg
    :target: https://developer.nvidia.com/isaac-sim
-   :alt: IsaacSim 6.0.0
+   :alt: IsaacSim 6.0.1
 
 .. image:: https://img.shields.io/badge/python-3.12-blue.svg
-   :target: https://www.python.org/downloads/release/python-31013/
+   :target: https://www.python.org/downloads/release/python-3120/
    :alt: Python 3.12
 
 .. image:: https://img.shields.io/badge/platform-linux--64-orange.svg
@@ -20,17 +20,13 @@ Local Installation
    :alt: Windows 11
 
 
-Isaac Lab installation is available for Windows and Linux. This guide explains the recommended
-installation methods.
 
 .. note::
 
    **Isaac Lab 3.0 supports kit-less installation.** You can install and use Isaac Lab with the
-   Newton physics backend *without* installing Isaac Sim. Simply clone Isaac Lab and run:
+   Newton physics backend *without* installing Isaac Sim. Clone Isaac Lab and run:
 
-   .. code-block:: bash
-
-      ./isaaclab.sh --install   # or ./isaaclab.sh -i
+   .. isaaclab-kitless-install-snippet::
 
    This installs the core Isaac Lab packages and the Newton physics backend. Isaac Sim is **not**
    required for this mode. See :doc:`kitless_installation` for which features are available
@@ -43,7 +39,7 @@ installation methods.
 .. caution::
 
    We have dropped support for Isaac Sim versions 5.1.0 and below. We recommend using the latest
-   Isaac Sim 6.0.0 release to benefit from the latest features and improvements.
+   Isaac Sim 6.0.1 release to benefit from the latest features and improvements.
 
    For more information, please refer to the
    `Isaac Sim release notes <https://docs.isaacsim.omniverse.nvidia.com/latest/overview/release_notes.html#>`__.
@@ -51,6 +47,11 @@ installation methods.
 
 System Requirements
 -------------------
+
+.. warning::
+
+   Windows support is still being completed, so some workflows may not work as expected.
+   For the most reliable installation and runtime experience, we recommend using Ubuntu 24.04.
 
 General Requirements
 ~~~~~~~~~~~~~~~~~~~~
@@ -77,10 +78,9 @@ Drivers other than those recommended on `Omniverse Technical Requirements <https
 may work but have not been validated against all Omniverse tests.
 
 - Use the **latest NVIDIA production branch driver**.
-- On Linux, version ``580.65.06`` or later is recommended, especially when upgrading to
-  **Ubuntu 22.04.5 with kernel 6.8.0-48-generic** or newer.
-- On Spark, version ``580.95.05`` is recommended.
-- On Windows, version ``580.88`` is recommended.
+- On Linux (x86_64 and aarch64), version ``580.95.05`` or later is recommended.
+- On Spark (Linux aarch64), version ``580.142`` is recommended.
+- On Windows, version ``581.42.00`` is recommended.
 - If you are using a new GPU or encounter driver issues, install the latest production branch
   driver from the `Unix Driver Archive <https://www.nvidia.com/en-us/drivers/unix/>`_
   using the ``.run`` installer.
@@ -94,19 +94,21 @@ The DGX spark is a standalone machine learning device with aarch64 architecture.
 features of Isaac Lab are not currently supported on the DGX spark. The most noteworthy is that the architecture *requires* CUDA ≥ 13, and thus the cu13 build of PyTorch or newer.
 Other notable limitations with respect to Isaac Lab include...
 
-#. `SkillGen <https://isaac-sim.github.io/IsaacLab/main/source/overview/imitation-learning/skillgen.html>`_ is not supported out of the box. This
+#. :doc:`SkillGen </source/overview/imitation-learning/skillgen>` is not supported out of the box. This
    is because cuRobo builds native CUDA/C++ extensions that requires specific tooling and library versions which are not validated for use with DGX spark.
 
 #. Extended reality teleoperation tools such as :class:`OpenXR <isaaclab.devices.OpenXRDevice>` is not supported. This is due
    to encoding performance limitations that have not yet been fully investigated.
 
-#. SKRL training with `JAX <https://docs.jax.dev/en/latest/notebooks/thinking_in_jax.html>`_ has not been explicitly validated or tested in Isaac Lab on the DGX Spark.
-   JAX provides pre-built CUDA wheels only for Linux on x86_64, so on aarch64 systems (e.g., DGX Spark) it runs on CPU only by default.
-   GPU support requires building JAX from source, which has not been validated in Isaac Lab.
-
 #. Livestream and Hub Workstation Cache are not supported on the DGX spark.
 
 #. :ref:`Running Cosmos Transfer1 <running-cosmos>` is not currently supported on the DGX Spark.
+
+#. Newton VBD deformable support is limited on DGX Spark because no pre-built
+   ``pytetwild`` wheel is available for ARM (aarch64). ``pytetwild`` is required for
+   automatic tetrahedral mesh generation of volume deformables.
+
+#. RLinf support has not been verified on DGX Spark.
 
 .. note::
 
@@ -157,11 +159,14 @@ Use this table to decide:
 +---------------------+------------------------------+------------------------------+-------------------------------+------------+
 | Binary + Source     | |:inbox_tray:| binary        | |:floppy_disk:| source (git) | Users preferring binary       | Easy       |
 |                     | download                     |                              | install of Isaac Sim          |            |
+|                     |                              |                              | *(conda/uv/venv unsupported;  |            |
+|                     |                              |                              | use bundled Python or pip)*   |            |
 +---------------------+------------------------------+------------------------------+-------------------------------+------------+
 | Full Source Build   | |:floppy_disk:| source (git) | |:floppy_disk:| source (git) | Developers modifying both     | Advanced   |
 +---------------------+------------------------------+------------------------------+-------------------------------+------------+
 | Pip Only            | |:package:| pip install      | |:package:| pip install      | External extensions only      | Special    |
-|                     |                              |                              | (no training/examples)        | case       |
+|                     |                              |                              | (no training/examples).       | case       |
+|                     |                              |                              | Use ``[isaacsim,all]``.       |            |
 +---------------------+------------------------------+------------------------------+-------------------------------+------------+
 | Docker              | |:whale:| Docker             | |:floppy_disk:| source (git) | Docker users                  | Advanced   |
 +---------------------+------------------------------+------------------------------+-------------------------------+------------+
@@ -196,7 +201,7 @@ Once you've reviewed the installation methods, continue with the guide that matc
 
 - :doc:`isaaclab_pip_installation`
 
-  - Install Isaac Sim and Isaac Lab as pip packages.
+  - Install Isaac Sim and Isaac Lab as pip packages with ``isaaclab[isaacsim,all]``.
   - Best for advanced users building **external extensions** with custom runner scripts.
   - Note: This does **not** include training or example scripts.
 
@@ -231,3 +236,4 @@ Please follow the steps :doc:`asset_caching` to enable asset caching and speed u
    source_installation
    isaaclab_pip_installation
    asset_caching
+   uv run (experimental) <uv_run>

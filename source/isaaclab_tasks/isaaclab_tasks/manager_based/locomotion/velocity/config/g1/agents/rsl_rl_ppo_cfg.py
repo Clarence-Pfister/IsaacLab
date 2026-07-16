@@ -3,29 +3,35 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
 
-from isaaclab_rl.rsl_rl import (
-    RslRlOnPolicyRunnerCfg,
-    RslRlPpoActorCriticCfg,
-    RslRlPpoAlgorithmCfg,
-)
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+
+from isaaclab_tasks.utils import preset
 
 
 @configclass
 class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
-    max_iterations = 3000
+    # Newton needs ~1.7x the PPO iterations to match PhysX on G1. PhysX saturates near iter 3000
+    # (reward ≈ +18, ep_len ≈ 980) and does not meaningfully improve on either metric past that —
+    # reward oscillates +16 to +19 through iter 7500, ep_len stays flat. Newton reaches the same
+    # (reward, ep_len) quality at iter 5000 (+16 / 984). Comparing reward alone is misleading:
+    # ep_len confirms the robot is stable in both cases. The gap is sample-efficiency, not a
+    # ceiling — no physics or reward tuning closes it.
+    max_iterations = preset(default=3000, newton=5000)
     save_interval = 50
     experiment_name = "g1_rough"
-    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=1.0,
-        actor_obs_normalization=False,
-        critic_obs_normalization=False,
-        actor_hidden_dims=[512, 256, 128],
-        critic_hidden_dims=[512, 256, 128],
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
         activation="elu",
+        obs_normalization=False,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[512, 256, 128],
+        activation="elu",
+        obs_normalization=False,
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,
@@ -50,8 +56,8 @@ class G1FlatPPORunnerCfg(G1RoughPPORunnerCfg):
 
         self.max_iterations = 1500
         self.experiment_name = "g1_flat"
-        self.policy.actor_hidden_dims = [256, 128, 128]
-        self.policy.critic_hidden_dims = [256, 128, 128]
+        self.actor.hidden_dims = [256, 128, 128]
+        self.critic.hidden_dims = [256, 128, 128]
 
 
 @configclass
@@ -72,8 +78,8 @@ class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
         self.max_iterations = 100000
         self.save_interval = 500
 
-        self.policy.actor_hidden_dims = [1024, 1024, 1024, 1024, 1024, 1024]
-        self.policy.critic_hidden_dims = [1024, 1024, 1024, 1024]
+        self.actor.hidden_dims = [1024, 1024, 1024, 1024, 1024, 1024]
+        self.critic.hidden_dims = [1024, 1024, 1024, 1024]
         self.num_steps_per_env = 32
         self.algorithm.learning_rate = 5e-5
         self.algorithm.num_mini_batches = 4

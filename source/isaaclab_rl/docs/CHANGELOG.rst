@@ -1,6 +1,90 @@
 Changelog
 ---------
 
+0.5.7 (2026-07-14)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed standalone ``isaaclab_rl`` installs downgrading ``pillow`` below the
+  version prebundled by Isaac Sim: ``moviepy`` 2.x caps ``pillow<12.0``, and
+  on aarch64 the forced downgrade deleted the prebundled copy that
+  ``omni.kit.pip_archive`` shares via per-file symlinks, breaking extension
+  startup. Added a ``pillow>=12.1.1`` floor so pip resolves ``moviepy`` 1.0.3
+  instead of touching pillow.
+* Fixed ``--video`` recording crashing on prerelease-allowing installs by
+  bounding ``moviepy`` to ``>=1.0.3,<2.0.0.dev0``: once the pillow floor
+  excludes stable ``moviepy`` 2.x, such resolvers otherwise fall through to
+  the broken ``2.0.0.dev2`` build whose ``write_videofile`` drops the clip
+  fps.
+
+
+0.5.6 (2026-07-11)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed docker installs deleting ``packaging`` from Isaac Sim's
+  ``omni.isaac.core_archive`` prebundle by removing the ``packaging<24`` bound
+  (no consumer requires it). The deletion dangled the symlink farm that
+  ``omni.services.pip_archive`` shares with it and broke 13 extensions at
+  startup.
+
+
+0.5.5 (2026-06-26)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Bumped the ``h5py`` requirement from a pinned ``==3.15.1`` to ``>=3.16.0``.
+
+
+0.5.4 (2026-06-10)
+~~~~~~~~~~~~~~~~~~
+
+Fixed
+^^^^^
+
+* Fixed :func:`~isaaclab_rl.skrl.SkrlVecEnvWrapper` failing to import the JAX wrapper on recent JAX
+  versions by preloading the ``jax.experimental.multihost_utils`` submodule that skrl's distributed
+  models reference without importing.
+* Fixed LEAPP export of RSL-RL recurrent policies to preserve actor hidden
+  state across supported RSL-RL policy APIs.
+
+
+0.5.3 (2026-06-02)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Changed the ``skrl`` optional dependency floor to ``2.1.0`` for
+  compatibility with ``warp-lang`` 1.13.
+
+
+0.5.2 (2026-05-08)
+~~~~~~~~~~~~~~~~~~
+
+Added
+^^^^^
+
+* Added RSL-RL LEAPP export scripts and integration tests for exporting trained
+  policies with semantic input, output, and state annotations.
+
+
+0.5.1 (2026-04-21)
+~~~~~~~~~~~~~~~~~~
+
+Changed
+^^^^^^^
+
+* Locked h5py dependency to last stable version 3.15.1 to prevent package import errors on Windows with version 3.16.0.
+* Updated skrl wrapper to support the new version of skrl 2.0.
+
+
 0.5.0 (2026-3-04)
 ~~~~~~~~~~~~~~~~~~
 

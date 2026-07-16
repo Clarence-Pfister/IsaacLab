@@ -14,6 +14,9 @@ x-default-isaac-lab-volumes: &default-isaac-lab-volumes
     source: isaac-cache-kit
     target: ${DOCKER_ISAACSIM_ROOT_PATH}/kit/cache
   - type: volume
+    source: isaac-data-kit
+    target: ${DOCKER_ISAACSIM_ROOT_PATH}/kit/data
+  - type: volume
     source: isaac-cache-ov
     target: ${DOCKER_USER_HOME}/.cache/ov
   - type: volume
@@ -69,7 +72,6 @@ x-default-isaac-lab-volumes: &default-isaac-lab-volumes
 
 x-default-isaac-lab-environment: &default-isaac-lab-environment
   - ISAACSIM_PATH=${DOCKER_ISAACLAB_PATH}/_isaac_sim
-  - OMNI_KIT_ALLOW_ROOT=1
 
 x-default-isaac-lab-deploy: &default-isaac-lab-deploy
   resources:
@@ -136,6 +138,7 @@ services:
 volumes:
   # isaac-sim
   isaac-cache-kit:
+  isaac-data-kit:
   isaac-cache-ov:
   isaac-cache-pip:
   isaac-cache-gl:

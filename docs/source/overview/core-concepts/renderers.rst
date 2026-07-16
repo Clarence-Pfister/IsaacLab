@@ -7,11 +7,13 @@ Isaac Lab uses a pluggable renderer architecture to support different rendering 
 The :class:`~isaaclab.renderers.BaseRenderer` abstract base class defines the interface that all renderer
 implementations must follow.
 
-Isaac Lab supports two rendering backends:
+Isaac Lab supports three rendering backends:
 
-- **RTX renderer** (``IsaacRtxRendererCfg`` / ``OVRTXRendererCfg``) — NVIDIA's Omniverse RTX
-  rendering pipeline. Requires Isaac Sim. Best for photorealistic rendering, full camera sensor
-  support (RGB, depth, semantic segmentation, etc.), and production quality outputs.
+- **Isaac RTX renderer** (``IsaacRtxRendererCfg``) — NVIDIA's Omniverse RTX rendering pipeline
+  running inside Isaac Sim. Requires Isaac Sim. Best for photorealistic rendering, full camera
+  sensor support (RGB, depth, semantic segmentation, etc.), and production quality outputs.
+- **OVRTX renderer** (``OVRTXRendererCfg``) — A standalone RTX path-tracing renderer provided by
+  the ``isaaclab_ov`` extension. Delivers RTX-quality rendering.
 - **Newton Warp renderer** (``NewtonWarpRendererCfg``) — A lightweight GPU-accelerated renderer
   built on NVIDIA Warp. Works with the Newton physics backend and does **not** require Isaac Sim
   (kit-less mode). Ideal for training workflows where full RTX fidelity is not needed.
@@ -25,10 +27,24 @@ Choosing a renderer backend
 | Isaac RTX           | Yes                           | Full sensor fidelity, RTX       |
 |                     |                               | photorealism, PhysX backend     |
 +---------------------+-------------------------------+---------------------------------+
-| OVRTX               | Yes (+ ``isaaclab_ov``)       | Alternative RTX pipeline        |
+| OVRTX               | No (kit-less; needs           | RTX-quality rendering without   |
+|                     | ``isaaclab_ov`` + ``ovrtx``)  | requiring Isaac Sim             |
 +---------------------+-------------------------------+---------------------------------+
 | Newton Warp         | No (kit-less)                 | Newton backend, fast training   |
 +---------------------+-------------------------------+---------------------------------+
+
+.. note::
+
+   Visualization markers are not yet supported by Newton-based renderer backends,
+   including the Newton Warp renderer. Use an RTX-based renderer, such as the
+   Isaac RTX renderer or OVRTX renderer, when marker visualization is needed.
+
+.. note::
+   **Temporal information for camera-based RL.** Unlike RTX modes with temporal
+   anti-aliasing (DLSS, DLAA, TAA), the Newton Warp renderer does not inject
+   prior-frame information into the current image. Camera-control tasks that depend
+   on velocity-like visual cues should add explicit temporal observations
+   (e.g. task-local frame stacking) rather than relying on renderer-specific artifacts.
 
 Architecture Overview
 ---------------------
@@ -39,25 +55,35 @@ The renderer system consists of:
 2. **Renderer** — Factory that instantiates the appropriate backend based on renderer configuration class
 3. **RendererCfg** — Base configuration; each backend extends it with backend-specific options
 4. **Concrete implementations** — Backend-specific renderers in extension packages
+5. **RenderContext** — A management class for instantiating and accessing renderer instances using a **RendererCfg**.
+   After instantiation, a config can then be used to acquire the instance of the renderer as needed.
 
 .. code-block:: python
 
-   from isaaclab.renderers import BaseRenderer, Renderer
+   import isaaclab.sim as sim_utils
+   from isaaclab.renderers import BaseRenderer
    from isaaclab_newton.renderers import NewtonWarpRendererCfg
 
    # Create a Newton Warp renderer (no Isaac Sim required)
-   renderer: BaseRenderer = Renderer(NewtonWarpRendererCfg())
+   sim_ctx = sim_utils.SimulationContext.instance()
+   # RenderContext.get_renderer will instantiate the renderer backend
+   # or return an existing renderer with a matching config
+   renderer: BaseRenderer = sim_ctx.render_context.get_renderer(NewtonWarpRendererCfg())
    assert isinstance(renderer, BaseRenderer)
 
 For the RTX renderer (requires Isaac Sim):
 
 .. code-block:: python
 
-   from isaaclab.renderers import Renderer
-   from isaaclab.renderers import IsaacRtxRendererCfg  # or OVRTXRendererCfg
+   import isaaclab.sim as sim_utils
+   from isaaclab.renderers import BaseRenderer
+   from isaaclab_physx.renderers import IsaacRtxRendererCfg
 
    # Create an RTX renderer
-   renderer: BaseRenderer = Renderer(IsaacRtxRendererCfg())
+   sim_ctx = sim_utils.SimulationContext.instance()
+   # RenderContext.get_renderer will instantiate the renderer backend
+   # or return an existing renderer with a matching config
+   renderer: BaseRenderer = sim_ctx.render_context.get_renderer(IsaacRtxRendererCfg())
 
 For RTX renderer settings and presets (quality, balanced, performance), see
 :doc:`/source/how-to/configure_rendering`.
@@ -65,8 +91,8 @@ For RTX renderer settings and presets (quality, balanced, performance), see
 Core concepts
 -------------
 
-- **Use the factory**: Always instantiate renderers via the factory with a renderer-specific config class
-  (e.g. ``Renderer(IsaacRtxRendererCfg())``). Do not import or instantiate concrete backend classes
+- **Use the RenderContext**: Always instantiate renderers via the RenderContext with a renderer-specific config class
+  (e.g. ``sim_ctx.render_context.get_renderer(IsaacRtxRendererCfg())``). Do not import or instantiate concrete backend classes
   (e.g. ``IsaacRtxRenderer``, ``OVRTXRenderer``) directly—their names and package locations are
   implementation details and may change without notice.
 
@@ -76,31 +102,42 @@ Core concepts
 
   .. code-block:: python
 
+     import isaaclab.sim as sim_utils
+     from isaaclab.renderers import BaseRenderer
      # Lightweight: does not import OVRTX backend dependencies
      from isaaclab_ov.renderers import OVRTXRendererCfg
 
      # Lazily loads ovrtx when instantiated; may fail if isaaclab_ov / ovrtx is not installed
-     renderer: BaseRenderer = Renderer(OVRTXRendererCfg())
+     sim_ctx = sim_utils.SimulationContext.instance()
+     renderer: BaseRenderer = sim_ctx.render_context.get_renderer(OVRTXRendererCfg())
 
 Installing the OVRTX renderer
 ------------------------------
 
-The OVRTX renderer is provided by the ``isaaclab_ov`` extension and requires the
-`ovrtx <https://github.com/NVIDIA-Omniverse/ovrtx>`_ package (hosted on
-``pypi.nvidia.com``).
+The OVRTX renderer is provided by the ``isaaclab_ov`` extension. The extension's
+source package ships with the core install, but the renderer's ``ovrtx`` runtime
+wheel (the `ovrtx <https://github.com/NVIDIA-Omniverse/ovrtx>`_ package, hosted on
+``pypi.nvidia.com``) is **not** installed by default. You must request it
+explicitly — OVRTX does **not** require Isaac Sim.
 
-Install via the Isaac Lab CLI:
-
-.. code-block:: bash
-
-   # Install isaaclab_ov (and its ovrtx dependency) alongside the core package
-   ./isaaclab.sh -i ov
-
-Or install manually with pip:
+Install via the Isaac Lab CLI using the ``ov[ovrtx]`` token:
 
 .. code-block:: bash
 
-   pip install --extra-index-url https://pypi.nvidia.com -e source/isaaclab_ov
+   # Install the ovrtx runtime wheel on top of an existing install
+   ./isaaclab.sh -i ov[ovrtx]
+
+.. note::
+
+   The bare ``ov`` token does **not** install any runtime wheel (the source
+   packages are already part of the core install). Use ``ov[ovrtx]`` (or ``ov[all]``)
+   to pull in the ``ovrtx`` dependency.
+
+Or install manually with pip (note the ``[ovrtx]`` extra and the extra index URL):
+
+.. code-block:: bash
+
+   pip install --extra-index-url https://pypi.nvidia.com -e "source/isaaclab_ov[ovrtx]"
 
 - **Opaque render data**: The render data object returned by :meth:`~isaaclab.renderers.BaseRenderer.create_render_data` is passed to
   subsequent renderer methods. It should be completely opaque to the caller: inspecting or modifying it
@@ -114,4 +151,4 @@ See Also
 --------
 
 - :doc:`scene_data_providers` — how scene data flows from physics backends to renderers
-- :doc:`/source/features/visualization` — lightweight visualizer backends for interactive feedback
+- :doc:`/source/overview/core-concepts/visualization` — lightweight visualizer backends for interactive feedback

@@ -12,7 +12,7 @@ from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
-from isaaclab.utils import configclass
+from isaaclab.utils.configclass import configclass
 
 from .assembly_tasks_cfg import ASSET_DIR, Insertion
 
@@ -118,6 +118,7 @@ class AssemblyEnvCfg(DirectRLEnvCfg):
             friction_correlation_distance=0.00625,
             gpu_max_rigid_contact_count=2**23,
             gpu_max_rigid_patch_count=2**23,
+            gpu_collision_stack_size=2**27,
             gpu_max_num_partitions=1,  # Important for stable simulation.
         ),
         physics_material=RigidBodyMaterialCfg(

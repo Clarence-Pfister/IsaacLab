@@ -10,10 +10,6 @@ from isaaclab_physx.physics import PhysxCfg
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
-from isaaclab.devices import DevicesCfg
-from isaaclab.devices.gamepad import Se3GamepadCfg
-from isaaclab.devices.keyboard import Se3KeyboardCfg
-from isaaclab.devices.spacemouse import Se3SpaceMouseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ActionTermCfg as ActionTerm
 from isaaclab.managers import CurriculumTermCfg as CurrTerm
@@ -25,8 +21,8 @@ from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import CollisionPropertiesCfg, RigidBodyPropertiesCfg, UsdFileCfg
-from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.configclass import configclass
 from isaaclab.utils.noise import UniformNoiseCfg as Unoise
 
 import isaaclab_tasks.manager_based.manipulation.reach.mdp as mdp
@@ -38,7 +34,7 @@ class ReachPhysicsCfg(PresetCfg):
     default: PhysxCfg = PhysxCfg(bounce_threshold_velocity=0.2)
     physx: PhysxCfg = PhysxCfg(bounce_threshold_velocity=0.2)
 
-    newton: NewtonCfg = NewtonCfg(
+    newton_mjwarp: NewtonCfg = NewtonCfg(
         solver_cfg=MJWarpSolverCfg(
             njmax=50,
             nconmax=20,
@@ -66,7 +62,7 @@ class TableCfg(PresetCfg):
         ),
     )
 
-    newton: ArticulationCfg = ArticulationCfg(
+    newton_mjwarp: ArticulationCfg = ArticulationCfg(
         prim_path="/World/envs/env_.*/Table",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.5, 0.15, -0.5), rot=(0, 0, 0.707, 0.707), joint_pos={}, joint_vel={}
@@ -120,6 +116,7 @@ class CommandsCfg:
         body_name=MISSING,
         resampling_time_range=(4.0, 4.0),
         debug_vis=True,
+        position_success_threshold=0.05,
         ranges=mdp.UniformPoseCommandCfg.Ranges(
             pos_x=(0.35, 0.65),
             pos_y=(-0.2, 0.2),
@@ -256,20 +253,3 @@ class ReachEnvCfg(ManagerBasedRLEnvCfg):
         # simulation settings
         self.sim.dt = 1.0 / 60.0
         self.sim.physics = ReachPhysicsCfg()
-
-        self.teleop_devices = DevicesCfg(
-            devices={
-                "keyboard": Se3KeyboardCfg(
-                    gripper_term=False,
-                    sim_device=self.sim.device,
-                ),
-                "gamepad": Se3GamepadCfg(
-                    gripper_term=False,
-                    sim_device=self.sim.device,
-                ),
-                "spacemouse": Se3SpaceMouseCfg(
-                    gripper_term=False,
-                    sim_device=self.sim.device,
-                ),
-            },
-        )
