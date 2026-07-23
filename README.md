@@ -1,165 +1,317 @@
 ![Isaac Lab](docs/source/_static/isaaclab.jpg)
 
----
+# IsaacLab G1 Jump
 
-# Isaac Lab 3.0.0 Beta 2
+[![Isaac Lab](https://img.shields.io/badge/Isaac%20Lab-3.0.0%20Beta%202-76b900.svg)](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/)
+[![Isaac Sim](https://img.shields.io/badge/Isaac%20Sim-6.0.1-76b900.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
+[![Python](https://img.shields.io/badge/Python-3.12-blue.svg)](https://docs.python.org/3.12/)
+[![License](https://img.shields.io/badge/License-BSD--3--Clause-yellow.svg)](LICENSE)
 
-[![IsaacSim](https://img.shields.io/badge/IsaacSim-6.0.1-silver.svg)](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-[![Python](https://img.shields.io/badge/python-3.12-blue.svg)](https://docs.python.org/3/whatsnew/3.12.html)
-[![Linux platform](https://img.shields.io/badge/platform-linux--64-orange.svg)](https://releases.ubuntu.com/22.04/)
-[![Windows platform](https://img.shields.io/badge/platform-windows--64-orange.svg)](https://www.microsoft.com/en-us/)
-[![pre-commit](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/pre-commit.yaml?logo=pre-commit&logoColor=white&label=pre-commit&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/pre-commit.yaml)
-[![docs status](https://img.shields.io/github/actions/workflow/status/isaac-sim/IsaacLab/docs.yaml?label=docs&color=brightgreen)](https://github.com/isaac-sim/IsaacLab/actions/workflows/docs.yaml)
-[![License](https://img.shields.io/badge/license-BSD--3-yellow.svg)](https://opensource.org/licenses/BSD-3-Clause)
-[![License](https://img.shields.io/badge/license-Apache--2.0-yellow.svg)](https://opensource.org/license/apache-2-0)
+> [!IMPORTANT]
+> This is a research fork of [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab), not an official NVIDIA
+> distribution. The `g1-jump-project` branch is based on upstream `release/3.0.0-beta2` and contains
+> project-specific Unitree G1 tasks, assets, rewards, and Docker settings.
 
+This repository trains a 23-DoF Unitree G1 to reproduce a reference jump with RSL-RL. It also includes a
+stand-still task that is useful for validating the robot, simulation, and PPO setup before starting the more
+expensive jump training run.
 
-This branch is a development branch for Isaac Sim 6.0, which is currently only available through the Isaac Sim [GitHub repo](https://github.com/isaac-sim/IsaacSim).
-For installation, please refer to the Isaac Sim GitHub repo to build the latest Isaac Sim branch, and follow the binary installation method in the
-Isaac Lab documentation for Isaac Lab installation.
+## What this fork adds
 
-> [!WARNING]
-> A recent breaking change on the Isaac Lab `release/3.0.0-beta2` branch is not compatible with the `develop` branch of Isaac Sim on GitHub.
-> To run Isaac Lab with Isaac Sim's GitHub `develop` branch, use Isaac Lab commit [`f0234a82e432e2a0b0f0a26ca3c5b59e527ddaaa`](https://github.com/isaac-sim/IsaacLab/commit/f0234a82e432e2a0b0f0a26ca3c5b59e527ddaaa) or an earlier commit.
-> Alternatively, use the Isaac Lab [`v3.0.0-beta`](https://github.com/isaac-sim/IsaacLab/tree/v3.0.0-beta) tag.
+- A six-phase G1 jump task: idle, crouch, takeoff, flight, landing, and stand.
+- A CSV reference-motion loader with joint, root, quaternion SLERP, and foot-position interpolation.
+- Reference-state initialization, future reference previews, phase observations, contact checks, and
+  phase-weighted tracking rewards.
+- Separate G1 stand training and play environments.
+- PPO configurations for the jump and stand tasks.
+- A 23-DoF G1 MJCF asset, meshes, and processed jump reference data.
+- Host bind mounts for `logs/` and `data_storage/`, so results generated in Docker are immediately available on
+  the host.
 
-Note that this branch is currently under active development and may experience breaking changes or error messages.
-Performance issues and regressions may also be observed in some use cases.
+## Compatibility
 
+| Component | Version or branch |
+| --- | --- |
+| Project branch | `g1-jump-project` |
+| Isaac Lab base | `release/3.0.0-beta2` |
+| Isaac Lab package version | `3.0.0` |
+| Isaac Sim container | `6.0.1` |
+| Python | `3.12` |
+| RL library | RSL-RL |
 
-**Isaac Lab** is a GPU-accelerated, open-source framework designed to unify and simplify robotics research workflows,
-such as reinforcement learning, imitation learning, and motion planning. Built on [NVIDIA Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html),
-it combines fast and accurate physics and sensor simulation, making it an ideal choice for sim-to-real
-transfer in robotics.
+Isaac Lab and Isaac Sim versions are coupled. Do not change one without checking the upstream
+[compatibility documentation](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/setup/installation/index.html).
 
-Isaac Lab provides developers with a range of essential features for accurate sensor simulation, such as RTX-based
-cameras, LIDAR, or contact sensors. The framework's GPU acceleration enables users to run complex simulations and
-computations faster, which is key for iterative processes like reinforcement learning and data-intensive tasks.
-Moreover, Isaac Lab can run locally or be distributed across the cloud, offering flexibility for large-scale deployments.
+## Project tasks
 
-A detailed description of Isaac Lab can be found in our [arXiv paper](https://arxiv.org/abs/2511.04831).
+| Task ID | Purpose | Default experiment |
+| --- | --- | --- |
+| `Isaac-Velocity-Jump-G1-v0` | Train the reference-motion jump | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Play-v0` | Evaluate a jump checkpoint | `g1_jump` |
+| `Isaac-Velocity-Stand-G1-v0` | Train the G1 to stand still | `g1_stand` |
+| `Isaac-Velocity-Stand-G1-Play-v0` | Evaluate a stand checkpoint | `g1_stand` |
 
-## Key Features
+The task registrations are in
+[`config/g1/__init__.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/__init__.py).
 
-Isaac Lab offers a comprehensive set of tools and environments designed to facilitate robot learning:
+## Repository map
 
-- **Robots**: A diverse collection of robots, from manipulators, quadrupeds, to humanoids, with more than 16 commonly available models.
-- **Environments**: Ready-to-train implementations of more than 30 environments, which can be trained with popular reinforcement learning frameworks such as RSL RL, SKRL, RL Games, or Stable Baselines. We also support multi-agent reinforcement learning.
-- **Physics**: Rigid bodies, articulated systems, deformable objects
-- **Sensors**: RGB/depth/segmentation cameras, camera annotations, IMU, contact sensors, ray casters.
+| Path | Contents |
+| --- | --- |
+| [`jump_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump_env_cfg.py) | Jump robot, motion loader, observations, rewards, events, and terminations |
+| [`stand_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/stand_env_cfg.py) | Stand-still environment |
+| [`rsl_rl_ppo_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/agents/rsl_rl_ppo_cfg.py) | PPO runner configurations |
+| [`data_storage/`](data_storage) | G1 MJCF, meshes, processed reference CSV, and generated USD location |
+| [`docker/.env.base`](docker/.env.base) | Isaac Sim image, container naming, and streaming host settings |
+| [`docker/docker-compose.yaml`](docker/docker-compose.yaml) | Container services and host bind mounts |
 
+## Getting started with Docker
 
-## Getting Started
+### Prerequisites
 
-### Documentation
+- A Linux machine with a supported NVIDIA GPU and driver.
+- Docker Engine and Docker Compose.
+- NVIDIA Container Toolkit configured for Docker.
+- Enough disk space for the Isaac Sim image, build layers, shader caches, logs, and checkpoints.
 
-Our [documentation page](https://isaac-sim.github.io/IsaacLab) provides everything you need to get started, including
-detailed tutorials and step-by-step guides. Follow these links to learn more about:
+See the upstream [Docker guide](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/deployment/docker.html)
+for host setup and troubleshooting.
 
-- [Installation steps](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/setup/installation/index.html#local-installation)
-- [Reinforcement learning](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/overview/reinforcement-learning/rl_existing_scripts.html)
-- [Tutorials](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/tutorials/index.html)
-- [Available environments](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/overview/environments.html)
+### 1. Clone this fork
 
-## Performance Dashboard
+```bash
+git clone --branch g1-jump-project --single-branch \
+  https://github.com/Clarence-Pfister/IsaacLab-G1-Jump.git
+cd IsaacLab-G1-Jump
+```
 
-We continuously benchmark Isaac Lab across different physics backends, renderers, and data types.
-The **[Isaac Lab Performance Dashboard](https://nvidia.github.io/omniperf/)** provides interactive
-charts showing preset comparison results, performance history, and environment scaling data from
-our internal CI/CD benchmarks.
+### 2. Configure the container
 
-## Isaac Sim Version Dependency
+Review [`docker/.env.base`](docker/.env.base) before building. The project currently uses:
 
-Isaac Lab is built on top of Isaac Sim and requires specific versions of Isaac Sim that are compatible with each
-release of Isaac Lab. Below, we outline the recent Isaac Lab releases and GitHub branches and their corresponding
-dependency versions for Isaac Sim.
+```dotenv
+ISAACSIM_VERSION=6.0.1
+DOCKER_NAME_SUFFIX="-custom"
+COMPOSE_PROJECT_NAME=isaac-lab-custom
+ISAACSIM_HOST=<GPU_HOST_IP>
+```
 
-| Isaac Lab Version             | Isaac Sim Version         |
-| ----------------------------- | ------------------------- |
-| `release/3.0.0-beta2` branch  | Isaac Sim 6.0.0 / 6.0.1   |
-| `develop` branch              | Isaac Sim 6.0.0 / 6.0.1   |
-| `main` branch                 | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v3.0.0*`                     | Isaac Sim 6.0.0 / 6.0.1   |
-| `v2.3.X`                      | Isaac Sim 4.5 / 5.0 / 5.1 |
-| `v2.2.X`                      | Isaac Sim 4.5 / 5.0       |
-| `v2.1.X`                      | Isaac Sim 4.5             |
-| `v2.0.X`                      | Isaac Sim 4.5             |
+Replace `<GPU_HOST_IP>` with the GPU machine address that the streaming client can reach. Keep the EULA enabled only
+after reviewing and accepting the NVIDIA Omniverse license terms. Avoid committing private hostnames, credentials, or
+new machine-specific addresses.
 
-## Contributing to Isaac Lab
+### 3. Build and enter the container
 
-We wholeheartedly welcome contributions from the community to make this framework mature and useful for everyone.
-These may happen as bug reports, feature requests, or code contributions. For details, please check our
-[contribution guidelines](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/refs/contributing.html).
+The suffix keeps this project isolated from other Isaac Lab containers on the same host.
 
-## Show & Tell: Share Your Inspiration
+```bash
+./docker/container.py build base --suffix custom
+./docker/container.py start base --suffix custom
+./docker/container.py enter base --suffix custom
+```
 
-We encourage you to utilize our [Show & Tell](https://github.com/isaac-sim/IsaacLab/discussions/categories/show-and-tell)
-area in the `Discussions` section of this repository. This space is designed for you to:
+Stop the container from the host when finished:
 
-* Share the tutorials you've created
-* Showcase your learning content
-* Present exciting projects you've developed
+```bash
+./docker/container.py stop base --suffix custom
+```
 
-By sharing your work, you'll inspire others and contribute to the collective knowledge
-of our community. Your contributions can spark new ideas and collaborations, fostering
-innovation in robotics and simulation.
+The fork bind-mounts `source/`, `scripts/`, `docs/`, `tools/`, `logs/`, and `data_storage/`. Code changes and training
+artifacts therefore remain visible in the host checkout; routine `docker cp` commands are not required.
+
+### 4. Generate the G1 USD once
+
+The generated USD directory is intentionally ignored by Git. If
+`data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat.usda` is missing, run this inside the container:
+
+```bash
+./isaaclab.sh -p scripts/tools/convert_mjcf.py \
+  data_storage/g1_23dof_holo_compat.xml \
+  data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat.usda \
+  --collision-type "Convex Hull" \
+  --viz none
+```
+
+The jump environment reads both that USD and `data_storage/perfect_jump_processed.csv` at startup.
+
+## Train
+
+The top-level commands below are the supported Isaac Lab 3.0 interface. The older direct
+`scripts/reinforcement_learning/rsl_rl/*.py` entry points are deprecated.
+
+### Jump task
+
+```bash
+./isaaclab.sh train \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-v0 \
+  --num_envs 1000 \
+  --viz none
+```
+
+### Stand task
+
+```bash
+./isaaclab.sh train \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Stand-G1-v0 \
+  --num_envs 1000 \
+  --viz none
+```
+
+The jump runner defaults to 100,000 iterations and saves every 500 iterations. Override that during smoke tests:
+
+```bash
+./isaaclab.sh train \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-v0 \
+  --num_envs 32 \
+  --max_iterations 2 \
+  --viz none
+```
+
+### Resume training
+
+```bash
+./isaaclab.sh train \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-v0 \
+  --resume \
+  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
+  --viz none
+```
+
+## Evaluate a checkpoint
+
+```bash
+./isaaclab.sh play \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-Play-v0 \
+  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
+  --num_envs 1 \
+  --viz kit
+```
+
+If `--checkpoint` is omitted, Isaac Lab selects the latest checkpoint under the task's experiment directory.
+
+### Record video
+
+```bash
+./isaaclab.sh play \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-Play-v0 \
+  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
+  --num_envs 1 \
+  --video \
+  --video_length 400 \
+  --viz kit
+```
+
+For periodic video during training, add `--video --video_length 400 --video_interval 4000 --viz kit`.
+
+### Common options
+
+| Option | Meaning |
+| --- | --- |
+| `--task` | Registered training or play environment ID |
+| `--num_envs` | Number of parallel simulated environments |
+| `--max_iterations` | PPO iteration limit |
+| `--resume` | Resume an existing run |
+| `--checkpoint` | Checkpoint path or filename to load |
+| `--video` | Enable video recording |
+| `--video_length` | Recorded clip length in environment steps |
+| `--video_interval` | Training steps between recordings |
+| `--viz none` | Disable visualizers for maximum training throughput |
+| `--viz kit` | Use the Isaac Sim Kit visualizer |
+| `--livestream 2` | Enable WebRTC streaming for private or local networks |
+
+Run `./isaaclab.sh train --help` or `./isaaclab.sh play --help` for the complete version-specific CLI.
+
+## Monitor training
+
+From another shell in the same environment:
+
+```bash
+./isaaclab.sh -p -m tensorboard.main --logdir logs/rsl_rl
+```
+
+Jump runs are written to `logs/rsl_rl/g1_jump/`; stand runs are written to `logs/rsl_rl/g1_stand/`.
+
+## Remote execution and streaming
+
+For long runs, connect to the GPU host and keep the container shell in a named `tmux` session:
+
+```bash
+ssh USER@GPU_HOST
+tmux new -s g1-jump
+./docker/container.py enter base --suffix custom
+```
+
+Detach with `Ctrl+B`, then `D`, and reconnect later with:
+
+```bash
+tmux attach -t g1-jump
+```
+
+To stream a play run over a private network:
+
+```bash
+./isaaclab.sh play \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-Play-v0 \
+  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
+  --num_envs 1 \
+  --livestream 2 \
+  --viz kit
+```
+
+Use an [Isaac Sim livestream client](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/manual_livestream_clients.html)
+compatible with the configured Isaac Sim version. Firewall rules depend on the client, Isaac Sim version, and network
+topology. Expose only the documented ports, prefer a VPN or private network, and do not expose the stream directly to
+the public internet.
 
 ## Troubleshooting
 
-Please see the [troubleshooting](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/refs/troubleshooting.html) section for
-common fixes or [submit an issue](https://github.com/isaac-sim/IsaacLab/issues).
+- **Generated USD not found:** run the MJCF conversion command above and confirm the output filename ends in `.usda`.
+- **Reference CSV not found:** confirm `data_storage/perfect_jump_processed.csv` exists inside the container.
+- **No checkpoint found:** pass an explicit path under `logs/rsl_rl/g1_jump/` or `logs/rsl_rl/g1_stand/`.
+- **No viewport:** use `--viz kit`; `--viz none` intentionally disables visualization.
+- **Video is empty or unavailable:** use `--video --viz kit`; video automatically enables the offscreen camera pipeline.
+- **Container naming conflict:** use a unique `--suffix` consistently for `build`, `start`, `enter`, and `stop`.
+- **Need GPU diagnostics:** run `watch -n 1 nvidia-smi` on the GPU host.
 
-For issues related to Isaac Sim, we recommend checking its [documentation](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html)
-or opening a question on its [forums](https://forums.developer.nvidia.com/c/agx-autonomous-machines/isaac/67).
+For framework-level problems, consult the upstream
+[troubleshooting guide](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/refs/troubleshooting.html).
 
-## Support
+## Keeping the fork synchronized
 
-* Please use GitHub [Discussions](https://github.com/isaac-sim/IsaacLab/discussions) for discussing ideas,
-  asking questions, and requests for new features.
-* Github [Issues](https://github.com/isaac-sim/IsaacLab/issues) should only be used to track executable pieces of
-  work with a definite scope and a clear deliverable. These can be fixing bugs, documentation issues, new features,
-  or general updates.
+Keep personal development on `g1-jump-project`, use `origin` for this fork, and reserve `upstream` for NVIDIA Isaac
+Lab. Review upstream changes before merging because Isaac Lab and Isaac Sim frequently introduce coupled API changes.
 
-## Connect with the NVIDIA Omniverse Community
-
-Do you have a project or resource you'd like to share more widely? We'd love to hear from you!
-Reach out to the NVIDIA Omniverse Community team at OmniverseCommunity@nvidia.com to explore opportunities
-to spotlight your work.
-
-You can also join the conversation on the [Omniverse Discord](https://discord.com/invite/nvidiaomniverse) to
-connect with other developers, share your projects, and help grow a vibrant, collaborative ecosystem
-where creativity and technology intersect. Your contributions can make a meaningful impact on the Isaac Lab
-community and beyond!
-
-## License
-
-The Isaac Lab framework is released under [BSD-3 License](LICENSE). The `isaaclab_mimic` extension and its
-corresponding standalone scripts are released under [Apache 2.0](LICENSE-mimic). The license files of its
-dependencies and assets are present in the [`docs/licenses`](docs/licenses) directory.
-
-Note that full-featured workflows (PhysX, RTX rendering, ROS, URDF/MJCF importers) require
-[Isaac Sim](https://docs.isaacsim.omniverse.nvidia.com/latest/index.html), which includes
-components under proprietary licensing terms. Kit-less Newton workflows do not require Isaac Sim.
-Please see the [Isaac Sim license](docs/licenses/dependencies/isaacsim-license.txt) for details.
-
-Note that the `isaaclab_mimic` extension requires cuRobo, which has proprietary licensing terms that can be found in [`docs/licenses/dependencies/cuRobo-license.txt`](docs/licenses/dependencies/cuRobo-license.txt).
-
-
-## Citation
-
-If you use Isaac Lab in your research, please cite the technical report:
-
-```
-@article{mittal2025isaaclab,
-  title={Isaac Lab: A GPU-Accelerated Simulation Framework for Multi-Modal Robot Learning},
-  author={Mayank Mittal and Pascal Roth and James Tigue and Antoine Richard and Octi Zhang and Peter Du and Antonio Serrano-Muñoz and Xinjie Yao and René Zurbrügg and Nikita Rudin and Lukasz Wawrzyniak and Milad Rakhsha and Alain Denzler and Eric Heiden and Ales Borovicka and Ossama Ahmed and Iretiayo Akinola and Abrar Anwar and Mark T. Carlson and Ji Yuan Feng and Animesh Garg and Renato Gasoto and Lionel Gulich and Yijie Guo and M. Gussert and Alex Hansen and Mihir Kulkarni and Chenran Li and Wei Liu and Viktor Makoviychuk and Grzegorz Malczyk and Hammad Mazhar and Masoud Moghani and Adithyavairavan Murali and Michael Noseworthy and Alexander Poddubny and Nathan Ratliff and Welf Rehberg and Clemens Schwarke and Ritvik Singh and James Latham Smith and Bingjie Tang and Ruchik Thaker and Matthew Trepte and Karl Van Wyk and Fangzhou Yu and Alex Millane and Vikram Ramasamy and Remo Steiner and Sangeeta Subramanian and Clemens Volk and CY Chen and Neel Jawale and Ashwin Varghese Kuruttukulam and Michael A. Lin and Ajay Mandlekar and Karsten Patzwaldt and John Welsh and Huihua Zhao and Fatima Anes and Jean-Francois Lafleche and Nicolas Moënne-Loccoz and Soowan Park and Rob Stepinski and Dirk Van Gelder and Chris Amevor and Jan Carius and Jumyung Chang and Anka He Chen and Pablo de Heras Ciechomski and Gilles Daviet and Mohammad Mohajerani and Julia von Muralt and Viktor Reutskyy and Michael Sauter and Simon Schirm and Eric L. Shi and Pierre Terdiman and Kenny Vilella and Tobias Widmer and Gordon Yeoman and Tiffany Chen and Sergey Grizan and Cathy Li and Lotus Li and Connor Smith and Rafael Wiltz and Kostas Alexis and Yan Chang and David Chu and Linxi "Jim" Fan and Farbod Farshidian and Ankur Handa and Spencer Huang and Marco Hutter and Yashraj Narang and Soha Pouya and Shiwei Sheng and Yuke Zhu and Miles Macklin and Adam Moravanszky and Philipp Reist and Yunrong Guo and David Hoeller and Gavriel State},
-  journal={arXiv preprint arXiv:2511.04831},
-  year={2025},
-  url={https://arxiv.org/abs/2511.04831}
-}
+```bash
+git remote add upstream https://github.com/isaac-sim/IsaacLab.git  # first time only
+git fetch upstream
+git switch g1-jump-project
+git merge upstream/release/3.0.0-beta2
 ```
 
-## Acknowledgement
+After resolving any conflicts, regenerate the G1 USD if converter or schema behavior changed, then run a short stand
+and jump smoke test before starting a full training job.
 
-Isaac Lab development initiated from the [Orbit](https://isaac-orbit.github.io/) framework.
-We gratefully acknowledge the authors of Orbit for their foundational contributions.
+## Upstream documentation
+
+- [Isaac Lab 3.0.0 Beta 2 documentation](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/)
+- [Installation](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/setup/installation/index.html)
+- [Reinforcement learning workflows](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/overview/reinforcement-learning/rl_existing_scripts.html)
+- [Available environments](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/overview/environments.html)
+- [Contributing to Isaac Lab](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/source/refs/contributing.html)
+
+## License and attribution
+
+Isaac Lab is released under the [BSD 3-Clause License](LICENSE). The `isaaclab_mimic` extension and its standalone
+scripts are released under the [Apache License 2.0](LICENSE-mimic). Dependency and asset licenses are collected under
+[`docs/licenses/`](docs/licenses).
+
+This fork retains the upstream Isaac Lab copyright notices, contributor history, and
+[`CITATION.cff`](CITATION.cff). If you use Isaac Lab in published research, cite the upstream project as described in
+the citation file and clearly identify any project-specific modifications used in your experiments.
