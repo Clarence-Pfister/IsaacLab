@@ -12,9 +12,7 @@
 > distribution. `main` tracks upstream `release/3.0.0-beta2`; the project-specific Unitree G1 tasks, assets,
 > rewards, and container fixes live on topic branches that are combined on `integration/all`.
 
-This repository trains a 23-DoF Unitree G1 to reproduce a reference jump with RSL-RL. It also includes a
-stand-still task that is useful for validating the robot, simulation, and PPO setup before starting the more
-expensive jump training run.
+This repository trains a 23-DoF Unitree G1 to reproduce a reference jump with RSL-RL.
 
 ## What this fork adds
 
@@ -22,8 +20,7 @@ expensive jump training run.
 - A CSV reference-motion loader with joint, root, quaternion SLERP, and foot-position interpolation.
 - Reference-state initialization, future reference previews, phase observations, contact checks, and
   phase-weighted tracking rewards.
-- Separate G1 stand training and play environments.
-- PPO configurations for the jump and stand tasks.
+- PPO configuration for the jump task.
 - A 23-DoF G1 MJCF asset, meshes, and processed jump reference data.
 - Host bind mounts for `logs/` and `data_storage/`, so results generated in Docker are immediately available on
   the host.
@@ -48,8 +45,6 @@ Isaac Lab and Isaac Sim versions are coupled. Do not change one without checking
 | --- | --- | --- |
 | `Isaac-Velocity-Jump-G1-v0` | Train the reference-motion jump | `g1_jump` |
 | `Isaac-Velocity-Jump-G1-Play-v0` | Evaluate a jump checkpoint | `g1_jump` |
-| `Isaac-Velocity-Stand-G1-v0` | Train the G1 to stand still | `g1_stand` |
-| `Isaac-Velocity-Stand-G1-Play-v0` | Evaluate a stand checkpoint | `g1_stand` |
 
 The task registrations are in
 [`config/g1/__init__.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/__init__.py).
@@ -62,7 +57,7 @@ project can reuse a subset without inheriting the rest.
 | Branch | Contents |
 | --- | --- |
 | `main` | Upstream `release/3.0.0-beta2`, unmodified. The fork baseline. |
-| `feature/g1-jump` | The G1 jump and stand tasks, reference motion, assets, and PPO configs. |
+| `feature/g1-jump` | The G1 jump task, reference motion, assets, and PPO config. |
 | `fix/docker` | Container tooling fixes only, branched from `main`. Reusable on its own. |
 | `integration/all` | Merge of the topic branches. This is the branch to check out for development. |
 
@@ -74,7 +69,6 @@ if the container fixes are wanted, and combine on a new integration branch.
 | Path | Contents |
 | --- | --- |
 | [`jump_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump_env_cfg.py) | Jump robot, motion loader, observations, rewards, events, and terminations |
-| [`stand_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/stand_env_cfg.py) | Stand-still environment |
 | [`rsl_rl_ppo_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/agents/rsl_rl_ppo_cfg.py) | PPO runner configurations |
 | [`data_storage/`](data_storage) | G1 MJCF, meshes, processed reference CSV, and generated USD location |
 | [`docker/.env.base`](docker/.env.base) | Isaac Sim image, container naming, and streaming host settings |
@@ -182,22 +176,10 @@ The jump environment reads both that USD and `data_storage/perfect_jump_processe
 The top-level commands below are the supported Isaac Lab 3.0 interface. The older direct
 `scripts/reinforcement_learning/rsl_rl/*.py` entry points are deprecated.
 
-### Jump task
-
 ```bash
 ./isaaclab.sh train \
   --rl_library rsl_rl \
   --task Isaac-Velocity-Jump-G1-v0 \
-  --num_envs 1000 \
-  --viz none
-```
-
-### Stand task
-
-```bash
-./isaaclab.sh train \
-  --rl_library rsl_rl \
-  --task Isaac-Velocity-Stand-G1-v0 \
   --num_envs 1000 \
   --viz none
 ```
@@ -278,7 +260,7 @@ From another shell in the same environment:
 ./isaaclab.sh -p -m tensorboard.main --logdir logs/rsl_rl
 ```
 
-Jump runs are written to `logs/rsl_rl/g1_jump/`; stand runs are written to `logs/rsl_rl/g1_stand/`.
+Jump runs are written to `logs/rsl_rl/g1_jump/`.
 
 ## Remote execution and streaming
 
@@ -319,7 +301,7 @@ the public internet.
   regenerate, note that the converter ignores the filename you pass and writes
   `<dir>/<mjcf_stem>/<mjcf_stem>.usda`, so the file sits one directory deeper than the argument suggests.
 - **Reference CSV not found:** confirm `data_storage/perfect_jump_processed.csv` exists inside the container.
-- **No checkpoint found:** pass an explicit path under `logs/rsl_rl/g1_jump/` or `logs/rsl_rl/g1_stand/`.
+- **No checkpoint found:** pass an explicit path under `logs/rsl_rl/g1_jump/`.
 - **No viewport:** use `--viz kit`; `--viz none` intentionally disables visualization.
 - **Video is empty or unavailable:** use `--video --viz kit`; video automatically enables the offscreen camera pipeline.
 - **Container naming conflict:** use a unique `--suffix` consistently for `build`, `start`, `enter`, and `stop`.
@@ -346,8 +328,8 @@ git switch feature/g1-jump && git merge main
 git switch integration/all && git merge fix/docker feature/g1-jump
 ```
 
-After resolving any conflicts, regenerate the G1 USD if converter or schema behavior changed, then run a short stand
-and jump smoke test before starting a full training job.
+After resolving any conflicts, regenerate the G1 USD if converter or schema behavior changed, then run a short
+jump smoke test before starting a full training job.
 
 ## Upstream documentation
 
