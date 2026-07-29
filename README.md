@@ -9,8 +9,8 @@
 
 > [!IMPORTANT]
 > This is a research fork of [NVIDIA Isaac Lab](https://github.com/isaac-sim/IsaacLab), not an official NVIDIA
-> distribution. The `g1-jump-project` branch is based on upstream `release/3.0.0-beta2` and contains
-> project-specific Unitree G1 tasks, assets, rewards, and Docker settings.
+> distribution. `main` tracks upstream `release/3.0.0-beta2`; the project-specific Unitree G1 tasks, assets,
+> rewards, and container fixes live on topic branches that are combined on `integration/all`.
 
 This repository trains a 23-DoF Unitree G1 to reproduce a reference jump with RSL-RL. It also includes a
 stand-still task that is useful for validating the robot, simulation, and PPO setup before starting the more
@@ -32,8 +32,8 @@ expensive jump training run.
 
 | Component | Version or branch |
 | --- | --- |
-| Project branch | `g1-jump-project` |
-| Isaac Lab base | `release/3.0.0-beta2` |
+| Working branch | `integration/all` |
+| Isaac Lab base | `release/3.0.0-beta2` (tracked by `main`) |
 | Isaac Lab package version | `3.0.0` |
 | Isaac Sim container | `6.0.1` |
 | Python | `3.12` |
@@ -53,6 +53,21 @@ Isaac Lab and Isaac Sim versions are coupled. Do not change one without checking
 
 The task registrations are in
 [`config/g1/__init__.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/__init__.py).
+
+## Branches
+
+The fork keeps upstream, each concern, and the combined working state on separate branches so that a future
+project can reuse a subset without inheriting the rest.
+
+| Branch | Contents |
+| --- | --- |
+| `main` | Upstream `release/3.0.0-beta2`, unmodified. The fork baseline. |
+| `feature/g1-jump` | The G1 jump and stand tasks, reference motion, assets, and PPO configs. |
+| `fix/docker` | Container tooling fixes only, branched from `main`. Reusable on its own. |
+| `integration/all` | Merge of the topic branches. This is the branch to check out for development. |
+
+To start another Isaac Lab project on this fork, branch `feature/<name>` from `main`, merge `fix/docker` into it
+if the container fixes are wanted, and combine on a new integration branch.
 
 ## Repository map
 
@@ -80,10 +95,13 @@ for host setup and troubleshooting.
 ### 1. Clone this fork
 
 ```bash
-git clone --branch g1-jump-project --single-branch \
-  https://github.com/Clarence-Pfister/IsaacLab-G1-Jump.git
-cd IsaacLab-G1-Jump
+git clone --branch integration/all \
+  https://github.com/Clarence-Pfister/IsaacLab.git
+cd IsaacLab
 ```
+
+Clone without `--single-branch` so that `main`, `feature/g1-jump`, and `fix/docker` remain available for
+rebasing and for starting new projects.
 
 ### 2. Configure the container
 
@@ -91,10 +109,15 @@ Review [`docker/.env.base`](docker/.env.base) before building. The project curre
 
 ```dotenv
 ISAACSIM_VERSION=6.0.1
-DOCKER_NAME_SUFFIX="-custom"
 COMPOSE_PROJECT_NAME=isaac-lab-custom
 ISAACSIM_HOST=<GPU_HOST_IP>
 ```
+
+The image and container name suffix is not set here. It comes from the `--suffix` argument of
+[`docker/container.py`](docker/container.py), which exports `DOCKER_NAME_SUFFIX` to Compose itself; setting it in
+`.env.base` as well would be redundant and can disagree with the value the script uses. The argument has no
+default, so pass `--suffix custom` consistently to every `container.py` call, as the commands below do. An
+inconsistent suffix is the usual cause of "the container is not running" when it plainly is.
 
 Replace `<GPU_HOST_IP>` with the GPU machine address that the streaming client can reach. Keep the EULA enabled only
 after reviewing and accepting the NVIDIA Omniverse license terms. Avoid committing private hostnames, credentials, or
@@ -119,17 +142,37 @@ Stop the container from the host when finished:
 The fork bind-mounts `source/`, `scripts/`, `docs/`, `tools/`, `logs/`, and `data_storage/`. Code changes and training
 artifacts therefore remain visible in the host checkout; routine `docker cp` commands are not required.
 
-### 4. Generate the G1 USD once
+### 4. Regenerate the G1 USD (optional)
 
-The generated USD directory is intentionally ignored by Git. If
-`data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat.usda` is missing, run this inside the container:
+The generated USD is committed, so a fresh clone can build the environment without running the converter. Upstream
+`.gitignore` excludes every `*.usd`/`*.usda`; this one directory is re-included by an explicit exception because
+`G1_USD_PATH` loads it from disk. Regenerate it only after changing the MJCF or the converter:
 
 ```bash
 ./isaaclab.sh -p scripts/tools/convert_mjcf.py \
   data_storage/g1_23dof_holo_compat.xml \
-  data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat.usda \
+  data_storage/g1_23dof_holo_compat \
   --collision-type "Convex Hull" \
   --viz none
+```
+
+> [!NOTE]
+> The second argument selects a **directory**, not a file. The filename part is discarded:
+> [`convert_mjcf.py`](scripts/tools/convert_mjcf.py) passes only `usd_dir=os.path.dirname(output)` and never sets
+> `usd_file_name`, and [`MjcfConverter`](source/isaaclab/isaaclab/sim/converters/mjcf_converter.py) then overwrites
+> it with `<mjcf_stem>/<mjcf_stem>.usda`. The output is therefore always
+> `<dirname_of_second_argument>/<mjcf_stem>/<mjcf_stem>.usda`, one level deeper than the path written on the
+> command line. Passing `.../g1_23dof_holo_compat/g1_23dof_holo_compat.usda` and passing
+> `.../g1_23dof_holo_compat` produce exactly the same result.
+
+The command above therefore writes:
+
+```text
+data_storage/g1_23dof_holo_compat/          <- usd_dir: .asset_hash, config.yaml
+└── g1_23dof_holo_compat/                   <- created by the importer
+    ├── g1_23dof_holo_compat.usda           <- the file G1_USD_PATH points at
+    ├── payloads/
+    └── Textures/
 ```
 
 The jump environment reads both that USD and `data_storage/perfect_jump_processed.csv` at startup.
@@ -272,7 +315,9 @@ the public internet.
 
 ## Troubleshooting
 
-- **Generated USD not found:** run the MJCF conversion command above and confirm the output filename ends in `.usda`.
+- **Generated USD not found:** the USD is committed, so check out the assets rather than regenerating. If you did
+  regenerate, note that the converter ignores the filename you pass and writes
+  `<dir>/<mjcf_stem>/<mjcf_stem>.usda`, so the file sits one directory deeper than the argument suggests.
 - **Reference CSV not found:** confirm `data_storage/perfect_jump_processed.csv` exists inside the container.
 - **No checkpoint found:** pass an explicit path under `logs/rsl_rl/g1_jump/` or `logs/rsl_rl/g1_stand/`.
 - **No viewport:** use `--viz kit`; `--viz none` intentionally disables visualization.
@@ -285,14 +330,20 @@ For framework-level problems, consult the upstream
 
 ## Keeping the fork synchronized
 
-Keep personal development on `g1-jump-project`, use `origin` for this fork, and reserve `upstream` for NVIDIA Isaac
-Lab. Review upstream changes before merging because Isaac Lab and Isaac Sim frequently introduce coupled API changes.
+Use `origin` for this fork and reserve `upstream` for NVIDIA Isaac Lab. Advance `main` first so it keeps meaning
+"unmodified upstream", then merge it into the topic branches and re-integrate. Review upstream changes before
+merging because Isaac Lab and Isaac Sim frequently introduce coupled API changes.
 
 ```bash
 git remote add upstream https://github.com/isaac-sim/IsaacLab.git  # first time only
 git fetch upstream
-git switch g1-jump-project
-git merge upstream/release/3.0.0-beta2
+
+git switch main                                # main stays pure upstream
+git merge --ff-only upstream/release/3.0.0-beta2
+
+git switch fix/docker      && git merge main
+git switch feature/g1-jump && git merge main
+git switch integration/all && git merge fix/docker feature/g1-jump
 ```
 
 After resolving any conflicts, regenerate the G1 USD if converter or schema behavior changed, then run a short stand
