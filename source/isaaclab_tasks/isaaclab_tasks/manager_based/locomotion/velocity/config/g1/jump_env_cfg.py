@@ -1380,11 +1380,17 @@ class G1JumpRewardsCfg:
         },
     )
     # Smoothing
+    # The smoothness gradients below are calibrated so that each kernel sits near 0.55 at
+    # the error observed WITHIN the phases where that term carries non-zero weight. The
+    # previous values left every one of them pinned near 1.0 in its own active phase
+    # (0.986, 0.932, 0.988, 0.858 measured), where exp(-k*e) has slope -k*exp(-k*e) and so
+    # supplies almost no gradient: the agent collected a near-full bonus regardless of how
+    # hard it landed or how fast it moved.
     penalize_ground_impact = RewTerm(
         func=penalize_ground_impact,
         weight=1.0,
         params={
-            "gradient": 4.7e-8,
+            "gradient": 2.0e-6,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 8.0, 2.0),
         },
     )
@@ -1392,7 +1398,7 @@ class G1JumpRewardsCfg:
         func=penalize_torque_consumption,
         weight=1.0,
         params={
-            "gradient": 1.1e-6,
+            "gradient": 9.3e-6,
             "phase_weights": (1.0, 1.0, 0.25, 0.5, 2.0, 4.0),
         },
     )
@@ -1400,7 +1406,7 @@ class G1JumpRewardsCfg:
         func=penalize_joint_vel,
         weight=1.0,
         params={
-            "gradient": 1.3e-4,
+            "gradient": 6.3e-3,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 4.0, 12.0),
         },
     )
@@ -1408,7 +1414,7 @@ class G1JumpRewardsCfg:
         func=penalize_joint_acc,
         weight=1.0,
         params={
-            "gradient": 2.9e-7,
+            "gradient": 1.1e-6,
             "phase_weights": (0.5, 0.5, 0.0, 0.0, 4.0, 8.0),
         },
     )
