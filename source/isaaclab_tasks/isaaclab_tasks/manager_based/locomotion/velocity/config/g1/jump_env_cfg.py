@@ -26,7 +26,8 @@ from isaaclab.managers import CommandTermCfg, CommandTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab.utils import configclass
+from isaaclab_physx.physics import PhysxCfg
+from isaaclab.utils.configclass import configclass
 from isaaclab.utils.math import (
     axis_angle_from_quat,
     quat_from_euler_xyz,
@@ -65,7 +66,7 @@ JUMP_PHASES = {
 }
 
 G1_USD_PATH = str(
-    DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda"
+    DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda"
 )
 JOINT_NAMES = [
     "left_hip_pitch_joint",
@@ -105,7 +106,9 @@ JOINT_ACTION_SCALES = {
     "right_knee_joint": 1.00,
     "right_ankle_pitch_joint": 0.35,
     "right_ankle_roll_joint": 0.12,
-    "waist_yaw_joint": 0.00,
+    # The reference motion rotates the waist by up to 7.6 deg from its start pose, so a
+    # zero scale would leave that error uncorrectable by the policy.
+    "waist_yaw_joint": 0.20,
     "left_shoulder_pitch_joint": 0.30,
     "left_shoulder_roll_joint": 0.45,
     "left_shoulder_yaw_joint": 0.30,
@@ -116,6 +119,11 @@ JOINT_ACTION_SCALES = {
     "right_shoulder_yaw_joint": 0.30,
     "right_elbow_joint": 0.45,
     "right_wrist_roll_joint": 0.12,
+}
+PLAY_JOINT_ACTION_FILTER_ALPHA = {
+    ".*_hip_.*": 0.70,
+    ".*_knee_joint": 0.70,
+    ".*_ankle_.*": 0.65,
 }
 G1_23DOF_HOLO_COMPAT_ACTUATORS = {
     "legs": ImplicitActuatorCfg(
@@ -204,6 +212,18 @@ NON_FOOT_CONTACT_SENSOR_NAMES = CONTACT_SENSOR_NAMES[2:]
 # =============================================================================
 
 
+def get_reference_initial_state() -> tuple[dict[str, float], float]:
+    """Reads frame 0 of the reference motion for robot initialization.
+
+    Returns:
+        The joint positions [rad] keyed by joint name and the root height [m].
+    """
+    frame0 = pd.read_csv(CSV_MOTION_PATH, nrows=1).iloc[0]
+    joint_pos = {joint_name: float(frame0[joint_name]) for joint_name in JOINT_NAMES}
+    root_z = float(frame0["root_translateZ"])
+    return joint_pos, root_z
+
+
 def slerp_quat(
     q0: torch.Tensor,
     q1: torch.Tensor,
@@ -251,9 +271,16 @@ class MotionLoader:
         self.ref_joint_pos = torch.tensor(
             df[JOINT_NAMES].values, device=device, dtype=torch.float32
         )
+        # Central differences with one-sided boundary differences.
         self.ref_joint_vel = torch.zeros_like(self.ref_joint_pos)
-        self.ref_joint_vel[1:] = (
-            self.ref_joint_pos[1:] - self.ref_joint_pos[:-1]
+        self.ref_joint_vel[1:-1] = (
+            self.ref_joint_pos[2:] - self.ref_joint_pos[:-2]
+        ) / (2 * motion_dt)
+        self.ref_joint_vel[0] = (
+            self.ref_joint_pos[1] - self.ref_joint_pos[0]
+        ) / motion_dt
+        self.ref_joint_vel[-1] = (
+            self.ref_joint_pos[-1] - self.ref_joint_pos[-2]
         ) / motion_dt
 
         # Root Translation & Linear Velocity
@@ -261,9 +288,16 @@ class MotionLoader:
         self.ref_root_pos = torch.tensor(
             df[root_pos_cols].values, device=device, dtype=torch.float32
         )
+        # Central differences with one-sided boundary differences.
         self.ref_root_vel = torch.zeros_like(self.ref_root_pos)
-        self.ref_root_vel[1:] = (
-            self.ref_root_pos[1:] - self.ref_root_pos[:-1]
+        self.ref_root_vel[1:-1] = (
+            self.ref_root_pos[2:] - self.ref_root_pos[:-2]
+        ) / (2 * motion_dt)
+        self.ref_root_vel[0] = (
+            self.ref_root_pos[1] - self.ref_root_pos[0]
+        ) / motion_dt
+        self.ref_root_vel[-1] = (
+            self.ref_root_pos[-1] - self.ref_root_pos[-2]
         ) / motion_dt
 
         # Root Quaternions & Angular Rate
@@ -281,11 +315,26 @@ class MotionLoader:
                 to="xyzw",
             )
         )
+        # Central quaternion differences with one-sided boundary differences.
         self.ref_root_ang_vel = torch.zeros_like(self.ref_root_pos)
         root_delta_quat = quat_mul(
-            self.ref_root_quat[1:], quat_conjugate(self.ref_root_quat[:-1])
+            self.ref_root_quat[2:], quat_conjugate(self.ref_root_quat[:-2])
         )
-        self.ref_root_ang_vel[1:] = axis_angle_from_quat(root_delta_quat) / motion_dt
+        self.ref_root_ang_vel[1:-1] = axis_angle_from_quat(root_delta_quat) / (
+            2 * motion_dt
+        )
+        root_delta_quat_start = quat_mul(
+            self.ref_root_quat[1], quat_conjugate(self.ref_root_quat[0])
+        )
+        self.ref_root_ang_vel[0] = axis_angle_from_quat(
+            root_delta_quat_start
+        ) / motion_dt
+        root_delta_quat_end = quat_mul(
+            self.ref_root_quat[-1], quat_conjugate(self.ref_root_quat[-2])
+        )
+        self.ref_root_ang_vel[-1] = axis_angle_from_quat(
+            root_delta_quat_end
+        ) / motion_dt
 
         # Foot positions in the reference motion world frame.
         foot_pos_cols = [
@@ -323,8 +372,9 @@ class MotionLoader:
         idx_high = torch.ceil(frame_idx_float).to(torch.long)
 
         gradient = (frame_idx_float - idx_low).unsqueeze(-1)
-        idx_low = torch.clamp(idx_low, max=self.length - 1)
-        idx_high = torch.clamp(idx_high, max=self.length - 1)
+        # Defensively clamp negative times even though get_env_time cannot produce them.
+        idx_low = torch.clamp(idx_low, min=0, max=self.length - 1)
+        idx_high = torch.clamp(idx_high, min=0, max=self.length - 1)
         is_clamp = (idx_low >= self.length - 1).unsqueeze(-1)
 
         # Interpolate
@@ -390,12 +440,13 @@ def get_reward(u: torch.Tensor, v: torch.Tensor, gradient: float) -> torch.Tenso
 def get_jump_phase(env) -> torch.Tensor:
     """Returns the current reference jump phase for each environment."""
     current_time = get_env_time(env)
+    # Internal boundaries are phase starts; right=True preserves [start, end) semantics.
     phase_ends = torch.tensor(
-        [end / REFERENCE_MOTION_FPS for _, end in JUMP_PHASES.values()][1:],
+        [end / REFERENCE_MOTION_FPS for _, end in JUMP_PHASES.values()][:-1],
         device=env.device,
         dtype=current_time.dtype,
     )
-    return torch.bucketize(current_time, phase_ends, right=False)
+    return torch.bucketize(current_time, phase_ends, right=True)
 
 
 def get_phase_weight(env, phase_weights: Sequence[float]) -> torch.Tensor:
@@ -478,11 +529,12 @@ class JumpGoalCommand(CommandTerm):
         self.pose_command_w = torch.zeros(self.num_envs, 7, device=self.device)
         self.pose_command_w[:, 6] = 1.0
         self.target_displacement_w = torch.zeros(self.num_envs, 2, device=self.device)
+        self.target_yaw_displacement_w = torch.zeros(
+            self.num_envs, device=self.device
+        )
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
-        # flag to indicate first resampling to handle initial root fetch
-        self._is_first_resample = True
 
     def _resample_command(self, env_ids: Sequence[int]):
         r = self.cfg.ranges
@@ -506,21 +558,28 @@ class JumpGoalCommand(CommandTerm):
         )
 
         # Fetch current roots
-        if self._is_first_resample:
-            current_root_pos = torch.zeros((num_resampling, 3), device=self.device)
-            if hasattr(self._env.scene, "env_origins"):
-                env_origins = warp_to_torch(self._env.scene.env_origins).to(self.device)
-                current_root_pos[:, :2] = env_origins[env_ids, :2]
-            current_root_quat = torch.zeros((num_resampling, 4), device=self.device)
-            current_root_quat[:, 3] = 1.0
-            self._is_first_resample = False
-        else:
+        if (
+            self.robot.is_initialized
+            and hasattr(self.robot, "data")
+            and self.robot.data.root_pos_w.shape[0] == self.num_envs
+            and self.robot.data.root_quat_w.shape[0] == self.num_envs
+        ):
             current_root_pos = warp_to_torch(self.robot.data.root_pos_w).to(
                 self.device
             )[env_ids]
             current_root_quat = warp_to_torch(self.robot.data.root_quat_w).to(
                 self.device
             )[env_ids]
+        else:
+            # Fall back only for pre-initialization resampling; prefer real state when available.
+            current_root_pos = torch.zeros((num_resampling, 3), device=self.device)
+            if hasattr(self._env.scene, "env_origins"):
+                env_origins = warp_to_torch(self._env.scene.env_origins).to(self.device)
+                current_root_pos[:, :2] = env_origins[env_ids, :2]
+            initial_rot = torch.tensor(
+                self.robot.cfg.init_state.rot, device=self.device
+            )
+            current_root_quat = initial_rot.unsqueeze(0).expand(num_resampling, -1)
 
         # Convert to world frame
         pos_w, quat_w = combine_frame_transforms(
@@ -532,6 +591,12 @@ class JumpGoalCommand(CommandTerm):
         self.pose_command_w[env_ids, :3] = pos_w
         self.pose_command_w[env_ids, 3:] = quat_w
         self.target_displacement_w[env_ids] = pos_w[:, :2] - current_root_pos[:, :2]
+        _, _, goal_yaw = euler_xyz_from_quat(quat_w)
+        _, _, root_yaw = euler_xyz_from_quat(current_root_quat)
+        delta = goal_yaw - root_yaw
+        self.target_yaw_displacement_w[env_ids] = torch.atan2(
+            torch.sin(delta), torch.cos(delta)
+        )
 
         # Query terrain height at the target (x, y) position and set cz accordingly
         self.pose_command_w[env_ids, 2] = self._query_terrain_height(
@@ -562,32 +627,47 @@ class JumpGoalCommand(CommandTerm):
     def _query_terrain_height(
         self, x_targets: torch.Tensor, y_targets: torch.Tensor
     ) -> torch.Tensor:
-        """Helper function to query terrain height at specified (x, y) target positions using raycasting."""
-        import omni.physx
-        import carb
+        """Return terrain heights at target positions.
 
-        physx_query = omni.physx.get_physx_scene_query_interface()
-        heights = torch.zeros_like(x_targets, device=x_targets.device)
+        Args:
+            x_targets: Target world-frame x-coordinates [m].
+            y_targets: Target world-frame y-coordinates [m].
 
-        for i in range(len(x_targets)):
-            x_val = float(x_targets[i].item())
-            y_val = float(y_targets[i].item())
+        Returns:
+            Terrain heights [m], with the same shape and dtype as ``x_targets``.
 
-            ray_origin = carb.Float3(x_val, y_val, 50.0)
-            ray_direction = carb.Float3(0.0, 0.0, -1.0)
-            ray_distance = 100.0
+        Raises:
+            NotImplementedError: If the configured terrain is not a plane.
+        """
+        terrain_type = self._env.scene.cfg.terrain.terrain_type
+        if terrain_type == "plane":
+            return torch.zeros_like(x_targets)
 
-            hit = physx_query.raycast_closest(ray_origin, ray_direction, ray_distance)
-            if hit["hit"]:
-                heights[i] = hit["position"][2]
-            else:
-                heights[i] = 0.0
-
-        return heights
+        raise NotImplementedError(
+            "Per-target terrain height lookup is not implemented for terrain type "
+            f"{terrain_type!r}. A height query (for example, an "
+            "isaaclab.sensors.RayCaster) must be wired up before using non-flat "
+            "terrain; silently returning 0.0 would place goals below or above the "
+            "real ground."
+        )
 
     @property
     def command(self) -> torch.Tensor:
         return self.pose_command_w
+
+
+# =============================================================================
+# ACTION TERM CONFIGURATION
+# =============================================================================
+
+
+@configclass
+class LowPassJointPositionActionCfg(mdp.JointPositionActionCfg):
+    """Configuration for filtered joint position targets."""
+
+    class_type: type | str = "{DIR}.jump_actions:LowPassJointPositionAction"
+    alpha: float | dict[str, float] = 1.0
+    """New-target weight; lower values apply stronger low-pass filtering."""
 
 
 # =============================================================================
@@ -596,18 +676,20 @@ class JumpGoalCommand(CommandTerm):
 
 
 def obs_future_reference_preview(env) -> torch.Tensor:
-    """
-    Implements the reference trajectory preview [qz^r(t), qm^r(t+1), qm^r(t+4), qm^r(t+7)].
+    """Return the reference preview at offsets of 1, 4, and 7 reference frames.
+
+    The offsets are 0.0333, 0.1333, and 0.2333 seconds at 30 FPS. The preview is
+    ``[qz^r(t), qm^r(t+1), qm^r(t+4), qm^r(t+7)]`` and has 70 elements.
     """
     loader = get_loader(env)
     current_time = get_env_time(env)
-    step_dt = env.step_dt
+    reference_dt = 1.0 / REFERENCE_MOTION_FPS
 
     # Define future time offsets for preview
     t_0 = current_time
-    t_1 = current_time + (1 * step_dt)
-    t_4 = current_time + (4 * step_dt)
-    t_7 = current_time + (7 * step_dt)
+    t_1 = current_time + (1 * reference_dt)
+    t_4 = current_time + (4 * reference_dt)
+    t_7 = current_time + (7 * reference_dt)
 
     # Fetch reference states at respective times
     _, _, ref_root_0, _, _, _, _ = loader.get_state(t_0)
@@ -693,7 +775,8 @@ def reference_state_initialization(
         asset.write_root_pose_to_sim_index(
             root_pose=init_root_pose, env_ids=rsi_env_ids
         )
-        asset.write_root_velocity_to_sim_index(
+        # Reference velocities are link-derived, so use the matching link-frame writer.
+        asset.write_root_link_velocity_to_sim_index(
             root_velocity=init_root_vel, env_ids=rsi_env_ids
         )
 
@@ -780,7 +863,10 @@ def track_root_vel_z(env, gradient, phase_weights):
     current_time = get_env_time(env)
     _, _, _, ref_root_vel, _, _, _ = get_loader(env).get_state(current_time)
     ref_root_vel_z = ref_root_vel[:, 2:3]
-    current_root_vel_z = warp_to_torch(env.scene["robot"].data.root_lin_vel_w)[:, 2:3]
+    # Reference velocity is link-derived, so use the matching link-frame accessor.
+    current_root_vel_z = warp_to_torch(
+        env.scene["robot"].data.root_link_lin_vel_w
+    )[:, 2:3]
 
     r = get_reward(current_root_vel_z, ref_root_vel_z, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -800,7 +886,10 @@ def track_root_orientation(env, gradient, phase_weights):
 def track_root_angular_rate(env, gradient, phase_weights):
     current_time = get_env_time(env)
     _, _, _, _, _, ref_root_ang_vel, _ = get_loader(env).get_state(current_time)
-    current_root_ang_vel = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)
+    # Reference velocity is link-derived, so use the matching link-frame accessor.
+    current_root_ang_vel = warp_to_torch(
+        env.scene["robot"].data.root_link_ang_vel_w
+    )
 
     r = get_reward(current_root_ang_vel, ref_root_ang_vel, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -877,8 +966,6 @@ def target_orientation(env, gradient, phase_weights):
 
 def target_angular_rate(env, gradient, phase_weights):
     current_ang_vel = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)
-    target_quat = env.command_manager.get_command("jump_goal")[:, 3:7]
-    _, _, target_yaw = euler_xyz_from_quat(target_quat)
     active_frames = sum(
         end - start
         for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values())
@@ -887,8 +974,11 @@ def target_angular_rate(env, gradient, phase_weights):
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:
         return torch.zeros(env.num_envs, device=env.device)
+    target_yaw_displacement = env.command_manager.get_term(
+        "jump_goal"
+    ).target_yaw_displacement_w
     target_ang_vel = torch.zeros(env.num_envs, 3, device=env.device)
-    target_ang_vel[:, 2] = target_yaw / active_duration_s
+    target_ang_vel[:, 2] = target_yaw_displacement / active_duration_s
 
     r = get_reward(current_ang_vel, target_ang_vel, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -928,6 +1018,11 @@ def penalize_joint_acc(env, gradient, phase_weights):
 # =============================================================================
 # TERMINATION TERMS
 # =============================================================================
+
+
+def reference_motion_complete(env) -> torch.Tensor:
+    """Terminates when the reference motion has been exhausted for that env."""
+    return get_env_time(env) >= REFERENCE_DURATION_S
 
 
 def ground_contact(env, threshold: float, sensor_names: Sequence[str]) -> torch.Tensor:
@@ -1018,7 +1113,8 @@ class G1JumpSceneCfg(InteractiveSceneCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.78),
             rot=(0.0, 0.0, 0.0, 1.0),
-            joint_pos={r".*_joint": 0.0},
+            # Populated from the reference motion in G1JumpEnvCfg.__post_init__.
+            joint_pos={},
         ),
     )
     contact_forces_left_foot = set_contact_sensor(
@@ -1102,6 +1198,17 @@ class G1JumpActionsCfg:
         joint_names=JOINT_NAMES,
         scale=JOINT_ACTION_SCALES,
         use_default_offset=True,
+    )
+
+
+@configclass
+class G1JumpPlayActionsCfg:
+    joint_pos = LowPassJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=JOINT_NAMES,
+        scale=JOINT_ACTION_SCALES,
+        use_default_offset=True,
+        alpha=PLAY_JOINT_ACTION_FILTER_ALPHA,
     )
 
 
@@ -1311,7 +1418,7 @@ class G1JumpRewardsCfg:
 
 @configclass
 class G1JumpTerminationsCfg:
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
+    time_out = DoneTerm(func=reference_motion_complete, time_out=True)
     base_contact = DoneTerm(
         func=ground_contact,
         params={
@@ -1345,6 +1452,9 @@ class G1JumpTerminationsCfg:
 
 @configclass
 class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
+    sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
+        physics=PhysxCfg(enable_external_forces_every_iteration=True)
+    )
     scene: G1JumpSceneCfg = G1JumpSceneCfg(num_envs=4096, env_spacing=2.5)
     commands: G1JumpCommandCfg = G1JumpCommandCfg()
     actions: G1JumpActionsCfg = G1JumpActionsCfg()
@@ -1361,10 +1471,17 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics_material = self.scene.terrain.physics_material
         for sensor_name in CONTACT_SENSOR_NAMES:
             getattr(self.scene, sensor_name).update_period = self.sim.dt
+        # Keep default_joint_pos, non-RSI resets, and the default action offset aligned
+        # with reference frame 0.
+        init_joint_pos, init_root_z = get_reference_initial_state()
+        self.scene.robot.init_state.joint_pos = init_joint_pos
+        self.scene.robot.init_state.pos = (0.0, 0.0, init_root_z)
 
 
 @configclass
 class G1JumpEnvCfg_PLAY(G1JumpEnvCfg):
+    actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
+
     def __post_init__(self):
         super().__post_init__()
         self.scene.num_envs = 50

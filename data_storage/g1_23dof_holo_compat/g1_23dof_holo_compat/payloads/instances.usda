@@ -1,0 +1,720 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    doc = """Generated from Composed Stage of root layer /tmp/tmp9ghaax5w/g1_23dof_holo_compat.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_holo_compat_g_2b71ed/usdex_g1_23dof_holo_compat/g1_23dof_holo_compat.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_holo_compat_g_2b71ed/temp_g1_23dof_holo_compat/g1_23dof_holo_compat.usd
+
+
+Generated from Composed Stage of root layer /workspace/isaaclab/data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat/payloads/base.usd
+"""
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    upAxis = "Z"
+)
+
+def Scope "Instances"
+{
+    def Xform "pelvis_visual" (
+        prepend references = @./geometries.usd@</Geometries/pelvis_visual>
+    )
+    {
+        over "pelvis_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/pelvis_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "pelvis_contour_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/pelvis_contour_link_visual>
+    )
+    {
+        over "pelvis_contour_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/pelvis_contour_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_hip_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_hip_pitch_link_visual>
+    )
+    {
+        over "left_hip_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_hip_pitch_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_hip_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_hip_roll_link_visual>
+    )
+    {
+        over "left_hip_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_hip_roll_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_hip_yaw_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_hip_yaw_link_visual>
+    )
+    {
+        over "left_hip_yaw_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_hip_yaw_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_knee_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_knee_link_visual>
+    )
+    {
+        over "left_knee_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_knee_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_ankle_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_ankle_pitch_link_visual>
+    )
+    {
+        over "left_ankle_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_ankle_pitch_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_ankle_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_ankle_roll_link_visual>
+    )
+    {
+        over "left_ankle_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_ankle_roll_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_hip_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_hip_pitch_link_visual>
+    )
+    {
+        over "right_hip_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_hip_pitch_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_hip_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_hip_roll_link_visual>
+    )
+    {
+        over "right_hip_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_hip_roll_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_hip_yaw_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_hip_yaw_link_visual>
+    )
+    {
+        over "right_hip_yaw_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_hip_yaw_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_knee_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_knee_link_visual>
+    )
+    {
+        over "right_knee_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_knee_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_ankle_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_ankle_pitch_link_visual>
+    )
+    {
+        over "right_ankle_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_ankle_pitch_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_ankle_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_ankle_roll_link_visual>
+    )
+    {
+        over "right_ankle_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_ankle_roll_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "torso_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/torso_link_visual>
+    )
+    {
+        over "torso_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/torso_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "waist_yaw_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/waist_yaw_link_visual>
+    )
+    {
+        over "waist_yaw_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/waist_yaw_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "logo_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/logo_link_visual>
+    )
+    {
+        over "logo_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/logo_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "head_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/head_link_visual>
+    )
+    {
+        over "head_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/head_link_visual/VisualMaterials/black>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "black" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/black>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "waist_support_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/waist_support_link_visual>
+    )
+    {
+        over "waist_support_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/waist_support_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_shoulder_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_shoulder_pitch_link_visual>
+    )
+    {
+        over "left_shoulder_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_shoulder_pitch_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_shoulder_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_shoulder_roll_link_visual>
+    )
+    {
+        over "left_shoulder_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_shoulder_roll_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_shoulder_yaw_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_shoulder_yaw_link_visual>
+    )
+    {
+        over "left_shoulder_yaw_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_shoulder_yaw_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_elbow_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_elbow_link_visual>
+    )
+    {
+        over "left_elbow_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_elbow_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "left_wrist_roll_rubber_hand_visual" (
+        prepend references = @./geometries.usd@</Geometries/left_wrist_roll_rubber_hand_visual>
+    )
+    {
+        over "left_wrist_roll_rubber_hand_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/left_wrist_roll_rubber_hand_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_shoulder_pitch_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_shoulder_pitch_link_visual>
+    )
+    {
+        over "right_shoulder_pitch_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_shoulder_pitch_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_shoulder_roll_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_shoulder_roll_link_visual>
+    )
+    {
+        over "right_shoulder_roll_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_shoulder_roll_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_shoulder_yaw_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_shoulder_yaw_link_visual>
+    )
+    {
+        over "right_shoulder_yaw_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_shoulder_yaw_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_elbow_link_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_elbow_link_visual>
+    )
+    {
+        over "right_elbow_link_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_elbow_link_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+
+    def Xform "right_wrist_roll_rubber_hand_visual" (
+        prepend references = @./geometries.usd@</Geometries/right_wrist_roll_rubber_hand_visual>
+    )
+    {
+        over "right_wrist_roll_rubber_hand_visual" (
+            apiSchemas = ["MaterialBindingAPI", "MjcImageableAPI"]
+        )
+        {
+            custom rel material:binding
+            prepend rel material:binding = </Instances/right_wrist_roll_rubber_hand_visual/VisualMaterials/silver>
+            int mjc:group = 1
+        }
+
+        def Scope "VisualMaterials"
+        {
+            def Material "silver" (
+                instanceable = true
+                prepend references = @./materials.usda@</Materials/silver>
+            )
+            {
+            }
+        }
+    }
+}
+

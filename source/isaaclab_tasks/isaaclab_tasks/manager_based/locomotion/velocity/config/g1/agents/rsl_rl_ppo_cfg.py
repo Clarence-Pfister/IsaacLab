@@ -13,6 +13,7 @@ from isaaclab_tasks.utils import preset
 @configclass
 class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
+    obs_groups = {"actor": ["policy"], "critic": ["policy"]}
     # Newton needs ~1.7x the PPO iterations to match PhysX on G1. PhysX saturates near iter 3000
     # (reward ≈ +18, ep_len ≈ 980) and does not meaningfully improve on either metric past that —
     # reward oscillates +16 to +19 through iter 7500, ep_len stays flat. Newton reaches the same

@@ -1,0 +1,287 @@
+#usda 1.0
+(
+    customLayerData = {
+        string creator = "MuJoCo USD Converter v0.2.0"
+    }
+    defaultPrim = "g1_23dof_holo_compat"
+    doc = """Generated from Composed Stage of root layer /tmp/tmp9ghaax5w/g1_23dof_holo_compat.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_holo_compat_g_2b71ed/usdex_g1_23dof_holo_compat/g1_23dof_holo_compat.usdc
+
+
+Generated from Composed Stage of root layer /tmp/mjcf_import_g1_23dof_holo_compat_g_2b71ed/temp_g1_23dof_holo_compat/g1_23dof_holo_compat.usd
+
+
+Generated from Composed Stage of root layer /workspace/isaaclab/data_storage/g1_23dof_holo_compat/g1_23dof_holo_compat/payloads/base.usd
+"""
+    kilogramsPerUnit = 1
+    metersPerUnit = 1
+    subLayers = [
+        @./physics.usda@
+    ]
+    upAxis = "Z"
+)
+
+over "g1_23dof_holo_compat"
+{
+    over "Geometry"
+    {
+        over "pelvis"
+        {
+            over "left_hip_pitch_link"
+            {
+                over "left_hip_roll_link"
+                {
+                    over "left_hip_yaw_link"
+                    {
+                        over "left_knee_link"
+                        {
+                            over "left_ankle_pitch_link"
+                            {
+                                over "left_ankle_roll_link"
+                                {
+                                    over "left_ankle_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.01
+                                        float physxJoint:jointFriction = 0.2
+                                    }
+                                }
+
+                                over "left_ankle_pitch_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                    float physxJoint:armature = 0.01
+                                    float physxJoint:jointFriction = 0.2
+                                }
+                            }
+
+                            over "left_knee_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                                float physxJoint:armature = 0.01
+                                float physxJoint:jointFriction = 0.2
+                            }
+                        }
+
+                        over "left_hip_yaw_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                            float physxJoint:armature = 0.01
+                            float physxJoint:jointFriction = 0.2
+                        }
+                    }
+
+                    over "left_hip_roll_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                        float physxJoint:armature = 0.01
+                        float physxJoint:jointFriction = 0.2
+                    }
+                }
+
+                over "left_hip_pitch_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                    float physxJoint:armature = 0.01
+                    float physxJoint:jointFriction = 0.2
+                }
+            }
+
+            over "right_hip_pitch_link"
+            {
+                over "right_hip_roll_link"
+                {
+                    over "right_hip_yaw_link"
+                    {
+                        over "right_knee_link"
+                        {
+                            over "right_ankle_pitch_link"
+                            {
+                                over "right_ankle_roll_link"
+                                {
+                                    over "right_ankle_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.01
+                                        float physxJoint:jointFriction = 0.2
+                                    }
+                                }
+
+                                over "right_ankle_pitch_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                    float physxJoint:armature = 0.01
+                                    float physxJoint:jointFriction = 0.2
+                                }
+                            }
+
+                            over "right_knee_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                                float physxJoint:armature = 0.01
+                                float physxJoint:jointFriction = 0.2
+                            }
+                        }
+
+                        over "right_hip_yaw_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                            float physxJoint:armature = 0.01
+                            float physxJoint:jointFriction = 0.2
+                        }
+                    }
+
+                    over "right_hip_roll_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                        float physxJoint:armature = 0.01
+                        float physxJoint:jointFriction = 0.2
+                    }
+                }
+
+                over "right_hip_pitch_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                    float physxJoint:armature = 0.01
+                    float physxJoint:jointFriction = 0.2
+                }
+            }
+
+            over "torso_link"
+            {
+                over "left_shoulder_pitch_link"
+                {
+                    over "left_shoulder_roll_link"
+                    {
+                        over "left_shoulder_yaw_link"
+                        {
+                            over "left_elbow_link"
+                            {
+                                over "left_wrist_roll_rubber_hand"
+                                {
+                                    over "left_wrist_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.01
+                                        float physxJoint:jointFriction = 0.2
+                                    }
+                                }
+
+                                over "left_elbow_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                    float physxJoint:armature = 0.01
+                                    float physxJoint:jointFriction = 0.2
+                                }
+                            }
+
+                            over "left_shoulder_yaw_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                                float physxJoint:armature = 0.01
+                                float physxJoint:jointFriction = 0.2
+                            }
+                        }
+
+                        over "left_shoulder_roll_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                            float physxJoint:armature = 0.01
+                            float physxJoint:jointFriction = 0.2
+                        }
+                    }
+
+                    over "left_shoulder_pitch_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                        float physxJoint:armature = 0.01
+                        float physxJoint:jointFriction = 0.2
+                    }
+                }
+
+                over "right_shoulder_pitch_link"
+                {
+                    over "right_shoulder_roll_link"
+                    {
+                        over "right_shoulder_yaw_link"
+                        {
+                            over "right_elbow_link"
+                            {
+                                over "right_wrist_roll_rubber_hand"
+                                {
+                                    over "right_wrist_roll_joint" (
+                                        prepend apiSchemas = ["PhysxJointAPI"]
+                                    )
+                                    {
+                                        float physxJoint:armature = 0.01
+                                        float physxJoint:jointFriction = 0.2
+                                    }
+                                }
+
+                                over "right_elbow_joint" (
+                                    prepend apiSchemas = ["PhysxJointAPI"]
+                                )
+                                {
+                                    float physxJoint:armature = 0.01
+                                    float physxJoint:jointFriction = 0.2
+                                }
+                            }
+
+                            over "right_shoulder_yaw_joint" (
+                                prepend apiSchemas = ["PhysxJointAPI"]
+                            )
+                            {
+                                float physxJoint:armature = 0.01
+                                float physxJoint:jointFriction = 0.2
+                            }
+                        }
+
+                        over "right_shoulder_roll_joint" (
+                            prepend apiSchemas = ["PhysxJointAPI"]
+                        )
+                        {
+                            float physxJoint:armature = 0.01
+                            float physxJoint:jointFriction = 0.2
+                        }
+                    }
+
+                    over "right_shoulder_pitch_joint" (
+                        prepend apiSchemas = ["PhysxJointAPI"]
+                    )
+                    {
+                        float physxJoint:armature = 0.01
+                        float physxJoint:jointFriction = 0.2
+                    }
+                }
+
+                over "waist_yaw_joint" (
+                    prepend apiSchemas = ["PhysxJointAPI"]
+                )
+                {
+                    float physxJoint:armature = 0.01
+                    float physxJoint:jointFriction = 0.2
+                }
+            }
+        }
+    }
+}
+
