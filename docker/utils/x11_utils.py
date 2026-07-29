@@ -113,6 +113,13 @@ def x11_check(statefile: StateFile) -> tuple[list[str], dict[str, str]] | None:
             print("\tTo enable X11 forwarding, set 'X11_FORWARDING_ENABLED=1' in '.container.cfg'.")
 
     if is_x11_forwarding_enabled == "1":
+        # X11 forwarding needs a display to forward. A headless login, such as ssh without
+        # X11 forwarding, has no DISPLAY, so treat it as unavailable for this invocation
+        # instead of failing. The '.container.cfg' setting is left untouched so that a
+        # later session with a display still gets forwarding.
+        if "DISPLAY" not in os.environ:
+            print("[INFO] DISPLAY is not set; continuing without X11 forwarding for this headless session.")
+            return None
         x11_envars = configure_x11(statefile)
         # If X11 forwarding is enabled, return the proper args to
         # compose the x11.yaml file. Else, return an empty string.
@@ -208,6 +215,13 @@ def x11_refresh(statefile: StateFile):
     if is_x11_forwarding_enabled is not None:
         status = "enabled" if is_x11_forwarding_enabled == "1" else "disabled"
         print(f"[INFO] X11 Forwarding is {status} from the settings in '.container.cfg'")
+
+    # Refreshing the cookie requires a live X11 session to read it from. A headless login,
+    # such as ssh without X11 forwarding, has no DISPLAY, so there is nothing to refresh.
+    # Skip rather than fail: the caller can still open a plain shell in the container.
+    if "DISPLAY" not in os.environ:
+        print("[INFO] DISPLAY is not set; skipping X11 forwarding refresh for this headless session.")
+        return
 
     # if the file exists, delete it and create a new one
     if tmp_xauth_value is not None and Path(tmp_xauth_value).exists():

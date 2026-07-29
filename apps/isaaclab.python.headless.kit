@@ -27,6 +27,7 @@ log.outputStreamLevel = "Warn"
 "omni.physx.tensors" = {}
 "omni.physx.fabric" = {}
 "usdrt.scenegraph" = {}
+"omni.materialx.libs" = {}
 "omni.kit.telemetry" = {}
 "omni.kit.loop" = {}
 # this is needed to create physics material through CreatePreviewSurfaceMaterialPrim
@@ -167,6 +168,12 @@ fabricUseGPUInterop = true
 # Performance improvement
 resourcemonitor.timeBetweenQueries = 100
 
+[settings.log.channels]
+# Isaac Sim 6.0 emits this harmless notice before Fabric creates its global time.
+"usdrt.population.plugin" = "error"
+"omni.ext.plugin" = "error"
+"omni.platforminfo.plugin" = "error"
+
 # Register extension folder from this repo in kit
 [settings.app.exts]
 folders = [
@@ -178,7 +185,6 @@ folders = [
     "${exe-path}/../isaacsim/exts",  # isaac extensions for pip
     "${exe-path}/../isaacsim/extscache",  # isaac cache extensions for pip
     "${exe-path}/../isaacsim/extsPhysics",  # isaac physics extensions for pip
-    "${app}", # needed to find other app files
     "${app}/../source", # needed to find extensions in Isaac Lab
 ]
 

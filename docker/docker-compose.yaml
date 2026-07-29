@@ -75,6 +75,8 @@ x-default-isaac-lab-volumes: &default-isaac-lab-volumes
 
 x-default-isaac-lab-environment: &default-isaac-lab-environment
   - ISAACSIM_PATH=${DOCKER_ISAACLAB_PATH}/_isaac_sim
+  # Tasks that load assets from disk do not need the Nucleus cache process.
+  - OMNICLIENT_HUB_MODE=disabled
 
 x-default-isaac-lab-deploy: &default-isaac-lab-deploy
   resources:
@@ -104,6 +106,12 @@ services:
     volumes: *default-isaac-lab-volumes
     network_mode: host
     deploy: *default-isaac-lab-deploy
+    # The base image healthcheck waits for a Kit app to log "AppReady". This is an
+    # interactive dev shell that starts Isaac Sim on demand, so that never holds. The
+    # check also watches /isaac-sim/.nvidia-omniverse/logs/Kit while DOCKER_USER_HOME=/root
+    # sends Kit logs to /root instead. Nothing gates on this container being healthy.
+    healthcheck:
+      disable: true
     # This is the entrypoint for the container
     entrypoint: bash
     stdin_open: true

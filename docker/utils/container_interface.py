@@ -119,23 +119,55 @@ class ContainerInterface:
 
         Returns:
             True if the container is running, otherwise False.
+
+        Raises:
+            RuntimeError: If Docker could not be queried at all, for instance when the daemon
+                is down or its socket is not accessible to the invoking user.
         """
-        status = subprocess.run(
+        result = subprocess.run(
             ["docker", "container", "inspect", "-f", "{{.State.Status}}", self.container_name],
             capture_output=True,
             text=True,
             check=False,
-        ).stdout.strip()
-        return status == "running"
+        )
+        if result.returncode != 0:
+            # An absent container is a legitimate "not running" answer. Any other failure
+            # (daemon down, socket permissions, wrong context) must not be reported as one.
+            if "no such container" in result.stderr.lower():
+                return False
+            raise RuntimeError(
+                f"Failed to query the container '{self.container_name}' through Docker:\n"
+                f"  {result.stderr.strip()}"
+            )
+        return result.stdout.strip() == "running"
 
     def does_image_exist(self) -> bool:
         """Check if the Docker image exists.
 
         Returns:
             True if the image exists, otherwise False.
+
+        Raises:
+            RuntimeError: If Docker could not be queried at all, for instance when the daemon
+                is down or its socket is not accessible to the invoking user.
         """
-        result = subprocess.run(["docker", "image", "inspect", self.image_name], capture_output=True, text=True)
-        return result.returncode == 0
+        result = subprocess.run(
+            ["docker", "image", "inspect", self.image_name],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            # An absent image is a legitimate "does not exist" answer. Any other failure
+            # (daemon down, socket permissions, wrong context) must not be reported as one,
+            # otherwise the caller silently falls through to an unnecessary rebuild.
+            if "no such image" in result.stderr.lower():
+                return False
+            raise RuntimeError(
+                f"Failed to query the image '{self.image_name}' through Docker:\n"
+                f"  {result.stderr.strip()}"
+            )
+        return True
 
     def build(self):
         """Build the Docker image."""
@@ -166,15 +198,21 @@ class ContainerInterface:
 
     def start(self):
         """Build and start the Docker container using the Docker compose command."""
-        print(
-            f"[INFO] Building the docker image and starting the container '{self.container_name}' in the"
-            " background...\n"
-        )
+        print(f"[INFO] Starting the container '{self.container_name}' in the background...\n")
         # Check if the container history file exists
         container_history_file = self.context_dir / ".isaac-lab-docker-history"
         if not container_history_file.exists():
             # Create the file with sticky bit on the group
             container_history_file.touch(mode=0o2644, exist_ok=True)
+        # Docker creates missing bind-mount sources as root-owned directories. Create
+        # project output directories as the invoking host user before Compose starts.
+        for path in (self.context_dir.parent / "logs", self.context_dir.parent / "data_storage"):
+            path.mkdir(parents=True, exist_ok=True)
+            if not os.access(path, os.W_OK):
+                raise PermissionError(
+                    f"Bind-mount source is not writable: {path}. "
+                    "Repair its ownership before starting the container."
+                )
 
         # build the image for the base profile if not running base (up will build base already if profile is base)
         if self.profile != "base":
@@ -187,13 +225,16 @@ class ContainerInterface:
             )
             subprocess.run(cmd, check=False, cwd=self.context_dir, env=self.environ)
 
-        # start the container and build the image if not available
+        # Start the container, letting Compose build the image only when it is missing.
+        # Passing --build here would force a full rebuild on every start, which for the
+        # Isaac Sim image costs many minutes even when nothing changed. To deliberately
+        # rebuild after editing a Dockerfile, run './docker/container.py build'.
         cmd = (
             ["docker", "compose"]
             + self.add_yamls
             + self.add_profiles
             + self.add_env_files
-            + ["up", "--detach", "--build", "--remove-orphans"]
+            + ["up", "--detach", "--remove-orphans"]
         )
         subprocess.run(cmd, check=False, cwd=self.context_dir, env=self.environ)
 

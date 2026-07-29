@@ -38,8 +38,11 @@ if [ -d "$ISAACLAB_PATH/_isaac_sim" ]; then
     if [ -f "$ISAACLAB_PATH/_isaac_sim/setup_conda_env.sh" ]; then
         # shellcheck disable=SC1091
         . "$ISAACLAB_PATH/_isaac_sim/setup_conda_env.sh" >/dev/null 2>&1 || true
+    elif [ -f "$ISAACLAB_PATH/_isaac_sim/setup_python_env.sh" ] && [ -x "$ISAACLAB_PATH/_isaac_sim/python.sh" ]; then
+        # Isaac Sim container distributions source setup_python_env.sh from python.sh.
+        :
     else
-        echo "[WARNING] _isaac_sim is present but _isaac_sim/setup_conda_env.sh is missing; Isaac Sim env vars not exported." >&2
+        echo "[WARNING] _isaac_sim is present but its Python environment setup is missing." >&2
         echo "[WARNING] Re-extract the Isaac Sim binary zip if you intend to use the bundled binary." >&2
     fi
 fi
