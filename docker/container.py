@@ -49,7 +49,7 @@ def parse_cli_args() -> argparse.Namespace:
     parent_parser.add_argument(
         "--suffix",
         nargs="?",
-        default=None,
+        default="custom",
         help=(
             "Optional docker image and container name suffix.  Defaults to None, in which case, the docker name"
             " suffix is set to the empty string. A hyphen is inserted in between the profile and the suffix if"
