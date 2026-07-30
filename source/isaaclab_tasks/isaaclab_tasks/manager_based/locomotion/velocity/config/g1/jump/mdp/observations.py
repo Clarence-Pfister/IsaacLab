@@ -43,6 +43,19 @@ def obs_future_reference_preview(env) -> torch.Tensor:
     return preview
 
 
+def obs_goal_command(env) -> torch.Tensor:
+    """Return the jump goal in the frame of the robot's pose before the jump.
+
+    The command manager's public command is expressed in the world frame, which the policy
+    cannot use: it would have to infer its own global position to act on it, and the real
+    robot has no such feedback. The body-frame command is the goal as the paper defines it,
+    ``[cx, cy, cz]`` plus the turning direction as a quaternion, and is invariant to where
+    in the world the episode happens to start. The quaternion is used rather than a yaw
+    angle so the observation stays continuous when the turning range grows past +/-180 deg.
+    """
+    return env.command_manager.get_term("jump_goal").pose_command_b
+
+
 def obs_jump_phase(env) -> torch.Tensor:
     """Returns the current jump phase as a one-hot policy observation."""
     phase = get_jump_phase(env)

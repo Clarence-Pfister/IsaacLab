@@ -40,6 +40,7 @@ from .mdp import (
     foot_tracking_error,
     ground_contact,
     obs_future_reference_preview,
+    obs_goal_command,
     obs_jump_phase,
     penalize_ground_impact,
     penalize_joint_acc,
@@ -161,6 +162,9 @@ class G1JumpObservationsCfg:
         last_action = ObsTerm(
             func=mdp.last_action,
             params={"action_name": "joint_pos"},
+        )
+        goal_command = ObsTerm(
+            func=obs_goal_command,
         )
         reference_preview = ObsTerm(
             func=obs_future_reference_preview,

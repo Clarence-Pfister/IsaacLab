@@ -23,7 +23,7 @@ from .motion import (
     slerp_quat,
     warp_to_torch,
 )
-from .observations import obs_future_reference_preview, obs_jump_phase
+from .observations import obs_future_reference_preview, obs_goal_command, obs_jump_phase
 from .rewards import (
     penalize_ground_impact,
     penalize_joint_acc,
