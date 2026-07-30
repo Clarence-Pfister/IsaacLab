@@ -3,6 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+# data_storage holds the vendored G1 MJCF and the USD tree generated from it by
+# convert_mjcf.py. Rewriting either is counterproductive: whitespace and newline edits
+# change the input the converter hashes, .asset_hash is a bare digest that must stay
+# unterminated, and license headers do not belong in regenerated output.
+exclude: ^data_storage/
+
 repos:
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.14.10
