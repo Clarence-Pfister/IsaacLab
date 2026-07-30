@@ -35,9 +35,7 @@ import argparse
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(
-    description="Utility to convert a MJCF into USD format."
-)
+parser = argparse.ArgumentParser(description="Utility to convert a MJCF into USD format.")
 parser.add_argument("input", type=str, help="The path to the input MJCF file.")
 parser.add_argument("output", type=str, help="The path to store the USD file.")
 parser.add_argument(

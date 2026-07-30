@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
 #
 # SPDX-License-Identifier: BSD-3-Clause
@@ -38,9 +38,7 @@ class LowPassJointPositionAction(JointPositionAction):
             )
             for joint_name, alpha in zip(joint_names, alpha_values):
                 if not 0.0 < alpha <= 1.0:
-                    raise ValueError(
-                        f"Filter alpha must be in the range (0, 1]. Got {alpha} for {joint_name}."
-                    )
+                    raise ValueError(f"Filter alpha must be in the range (0, 1]. Got {alpha} for {joint_name}.")
             self._alpha[:, joint_ids] = torch.tensor(alpha_values, device=self.device)
         else:
             raise TypeError(f"Unsupported filter alpha type: {type(cfg.alpha)}.")
@@ -50,8 +48,7 @@ class LowPassJointPositionAction(JointPositionAction):
     def process_actions(self, actions: torch.Tensor):
         super().process_actions(actions)
         self._processed_actions[:] = (
-            self._alpha * self._processed_actions
-            + (1.0 - self._alpha) * self._previous_targets
+            self._alpha * self._processed_actions + (1.0 - self._alpha) * self._previous_targets
         )
         self._previous_targets[:] = self._processed_actions
 
@@ -59,6 +56,4 @@ class LowPassJointPositionAction(JointPositionAction):
         if env_ids is None:
             env_ids = slice(None)
         super().reset(env_ids)
-        self._previous_targets[env_ids] = self._asset.data.joint_pos.torch[env_ids][
-            :, self._joint_ids
-        ]
+        self._previous_targets[env_ids] = self._asset.data.joint_pos.torch[env_ids][:, self._joint_ids]

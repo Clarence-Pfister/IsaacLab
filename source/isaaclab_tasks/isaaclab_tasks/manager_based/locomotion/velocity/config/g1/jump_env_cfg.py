@@ -1,48 +1,49 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers.
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
 # All rights reserved.
+#
 # SPDX-License-Identifier: BSD-3-Clause
 
 from __future__ import annotations
 
 import os
-import torch
-import pandas as pd
-from typing import TYPE_CHECKING
 from collections.abc import Sequence
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-import isaaclab.sim as sim_utils
+import pandas as pd
+import torch
+from isaaclab_physx.physics import PhysxCfg
+
 import isaaclab.envs.mdp as mdp
+import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CommandTerm, CommandTermCfg, SceneEntityCfg
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
 from isaaclab.managers import RewardTermCfg as RewTerm
-from isaaclab.managers import SceneEntityCfg
 from isaaclab.managers import TerminationTermCfg as DoneTerm
-from isaaclab.managers import EventTermCfg as EventTerm
-from isaaclab.managers import CommandTermCfg, CommandTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import ContactSensorCfg
 from isaaclab.terrains import TerrainImporterCfg
-from isaaclab_physx.physics import PhysxCfg
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.math import (
     axis_angle_from_quat,
-    quat_from_euler_xyz,
-    euler_xyz_from_quat,
+    combine_frame_transforms,
     convert_quat,
+    euler_xyz_from_quat,
     normalize,
     quat_conjugate,
+    quat_from_euler_xyz,
     quat_mul,
     quat_unique,
-    combine_frame_transforms,
 )
 
 if TYPE_CHECKING:
-    from isaaclab.envs import ManagerBasedEnv
     from isaaclab.assets import Articulation
+    from isaaclab.envs import ManagerBasedEnv
 
 from isaaclab_assets.robots.unitree import G1_MINIMAL_CFG
 
@@ -65,9 +66,7 @@ JUMP_PHASES = {
     "STAND": (60, 91),
 }
 
-G1_USD_PATH = str(
-    DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda"
-)
+G1_USD_PATH = str(DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda")
 JOINT_NAMES = [
     "left_hip_pitch_joint",
     "left_hip_roll_joint",
@@ -185,25 +184,43 @@ G1_23DOF_HOLO_COMPAT_CFG.spawn.usd_path = G1_USD_PATH
 G1_23DOF_HOLO_COMPAT_CFG.spawn.activate_contact_sensors = True
 G1_23DOF_HOLO_COMPAT_CFG.actuators = G1_23DOF_HOLO_COMPAT_ACTUATORS
 
+# The G1 asset nests every link prim under its parent, so a contact sensor path is the whole
+# kinematic chain down from the pelvis. Compose each path from the one above it so the nesting
+# stays readable instead of repeating the shared prefixes.
+_GEOMETRY_ROOT = "{ENV_REGEX_NS}/Robot/Geometry"
+_PELVIS_PATH = f"{_GEOMETRY_ROOT}/pelvis"
+_TORSO_PATH = f"{_PELVIS_PATH}/torso_link"
+_LEFT_THIGH_PATH = f"{_PELVIS_PATH}/left_hip_pitch_link/left_hip_roll_link"
+_LEFT_SHIN_PATH = f"{_LEFT_THIGH_PATH}/left_hip_yaw_link/left_knee_link"
+_LEFT_FOOT_PATH = f"{_LEFT_SHIN_PATH}/left_ankle_pitch_link/left_ankle_roll_link"
+_RIGHT_THIGH_PATH = f"{_PELVIS_PATH}/right_hip_pitch_link/right_hip_roll_link"
+_RIGHT_SHIN_PATH = f"{_RIGHT_THIGH_PATH}/right_hip_yaw_link/right_knee_link"
+_RIGHT_FOOT_PATH = f"{_RIGHT_SHIN_PATH}/right_ankle_pitch_link/right_ankle_roll_link"
+_LEFT_UPPER_ARM_PATH = f"{_TORSO_PATH}/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link"
+_LEFT_LOWER_ARM_PATH = f"{_LEFT_UPPER_ARM_PATH}/left_elbow_link"
+_LEFT_HAND_PATH = f"{_LEFT_LOWER_ARM_PATH}/left_wrist_roll_rubber_hand"
+_RIGHT_UPPER_ARM_PATH = f"{_TORSO_PATH}/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link"
+_RIGHT_LOWER_ARM_PATH = f"{_RIGHT_UPPER_ARM_PATH}/right_elbow_link"
+_RIGHT_HAND_PATH = f"{_RIGHT_LOWER_ARM_PATH}/right_wrist_roll_rubber_hand"
+
+# The two feet must stay first: FOOT_CONTACT_SENSOR_NAMES slices them off the front.
 CONTACT_SENSOR_PRIM_PATHS = {
-    "left_foot": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link/left_hip_yaw_link/left_knee_link/left_ankle_pitch_link/left_ankle_roll_link",
-    "right_foot": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link/right_hip_yaw_link/right_knee_link/right_ankle_pitch_link/right_ankle_roll_link",
-    "pelvis": "{ENV_REGEX_NS}/Robot/Geometry/pelvis",
-    "left_thigh": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link",
-    "left_shin": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/left_hip_pitch_link/left_hip_roll_link/left_hip_yaw_link/left_knee_link",
-    "right_thigh": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link",
-    "right_shin": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/right_hip_pitch_link/right_hip_roll_link/right_hip_yaw_link/right_knee_link",
-    "torso": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link",
-    "left_upper_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link",
-    "left_lower_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link/left_elbow_link",
-    "left_hand": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/left_shoulder_pitch_link/left_shoulder_roll_link/left_shoulder_yaw_link/left_elbow_link/left_wrist_roll_rubber_hand",
-    "right_upper_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link",
-    "right_lower_arm": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link/right_elbow_link",
-    "right_hand": "{ENV_REGEX_NS}/Robot/Geometry/pelvis/torso_link/right_shoulder_pitch_link/right_shoulder_roll_link/right_shoulder_yaw_link/right_elbow_link/right_wrist_roll_rubber_hand",
+    "left_foot": _LEFT_FOOT_PATH,
+    "right_foot": _RIGHT_FOOT_PATH,
+    "pelvis": _PELVIS_PATH,
+    "left_thigh": _LEFT_THIGH_PATH,
+    "left_shin": _LEFT_SHIN_PATH,
+    "right_thigh": _RIGHT_THIGH_PATH,
+    "right_shin": _RIGHT_SHIN_PATH,
+    "torso": _TORSO_PATH,
+    "left_upper_arm": _LEFT_UPPER_ARM_PATH,
+    "left_lower_arm": _LEFT_LOWER_ARM_PATH,
+    "left_hand": _LEFT_HAND_PATH,
+    "right_upper_arm": _RIGHT_UPPER_ARM_PATH,
+    "right_lower_arm": _RIGHT_LOWER_ARM_PATH,
+    "right_hand": _RIGHT_HAND_PATH,
 }
-CONTACT_SENSOR_NAMES = tuple(
-    f"contact_forces_{name}" for name in CONTACT_SENSOR_PRIM_PATHS
-)
+CONTACT_SENSOR_NAMES = tuple(f"contact_forces_{name}" for name in CONTACT_SENSOR_PRIM_PATHS)
 FOOT_CONTACT_SENSOR_NAMES = CONTACT_SENSOR_NAMES[:2]
 NON_FOOT_CONTACT_SENSOR_NAMES = CONTACT_SENSOR_NAMES[2:]
 
@@ -268,37 +285,21 @@ class MotionLoader:
         motion_dt = 1 / REFERENCE_MOTION_FPS
 
         # Joint Positions & Velocities
-        self.ref_joint_pos = torch.tensor(
-            df[JOINT_NAMES].values, device=device, dtype=torch.float32
-        )
+        self.ref_joint_pos = torch.tensor(df[JOINT_NAMES].values, device=device, dtype=torch.float32)
         # Central differences with one-sided boundary differences.
         self.ref_joint_vel = torch.zeros_like(self.ref_joint_pos)
-        self.ref_joint_vel[1:-1] = (
-            self.ref_joint_pos[2:] - self.ref_joint_pos[:-2]
-        ) / (2 * motion_dt)
-        self.ref_joint_vel[0] = (
-            self.ref_joint_pos[1] - self.ref_joint_pos[0]
-        ) / motion_dt
-        self.ref_joint_vel[-1] = (
-            self.ref_joint_pos[-1] - self.ref_joint_pos[-2]
-        ) / motion_dt
+        self.ref_joint_vel[1:-1] = (self.ref_joint_pos[2:] - self.ref_joint_pos[:-2]) / (2 * motion_dt)
+        self.ref_joint_vel[0] = (self.ref_joint_pos[1] - self.ref_joint_pos[0]) / motion_dt
+        self.ref_joint_vel[-1] = (self.ref_joint_pos[-1] - self.ref_joint_pos[-2]) / motion_dt
 
         # Root Translation & Linear Velocity
         root_pos_cols = ["root_translateX", "root_translateY", "root_translateZ"]
-        self.ref_root_pos = torch.tensor(
-            df[root_pos_cols].values, device=device, dtype=torch.float32
-        )
+        self.ref_root_pos = torch.tensor(df[root_pos_cols].values, device=device, dtype=torch.float32)
         # Central differences with one-sided boundary differences.
         self.ref_root_vel = torch.zeros_like(self.ref_root_pos)
-        self.ref_root_vel[1:-1] = (
-            self.ref_root_pos[2:] - self.ref_root_pos[:-2]
-        ) / (2 * motion_dt)
-        self.ref_root_vel[0] = (
-            self.ref_root_pos[1] - self.ref_root_pos[0]
-        ) / motion_dt
-        self.ref_root_vel[-1] = (
-            self.ref_root_pos[-1] - self.ref_root_pos[-2]
-        ) / motion_dt
+        self.ref_root_vel[1:-1] = (self.ref_root_pos[2:] - self.ref_root_pos[:-2]) / (2 * motion_dt)
+        self.ref_root_vel[0] = (self.ref_root_pos[1] - self.ref_root_pos[0]) / motion_dt
+        self.ref_root_vel[-1] = (self.ref_root_pos[-1] - self.ref_root_pos[-2]) / motion_dt
 
         # Root Quaternions & Angular Rate
         root_quat_cols = [
@@ -309,32 +310,18 @@ class MotionLoader:
         ]
         self.ref_root_quat = normalize(
             convert_quat(
-                torch.tensor(
-                    df[root_quat_cols].values, device=device, dtype=torch.float32
-                ),
+                torch.tensor(df[root_quat_cols].values, device=device, dtype=torch.float32),
                 to="xyzw",
             )
         )
         # Central quaternion differences with one-sided boundary differences.
         self.ref_root_ang_vel = torch.zeros_like(self.ref_root_pos)
-        root_delta_quat = quat_mul(
-            self.ref_root_quat[2:], quat_conjugate(self.ref_root_quat[:-2])
-        )
-        self.ref_root_ang_vel[1:-1] = axis_angle_from_quat(root_delta_quat) / (
-            2 * motion_dt
-        )
-        root_delta_quat_start = quat_mul(
-            self.ref_root_quat[1], quat_conjugate(self.ref_root_quat[0])
-        )
-        self.ref_root_ang_vel[0] = axis_angle_from_quat(
-            root_delta_quat_start
-        ) / motion_dt
-        root_delta_quat_end = quat_mul(
-            self.ref_root_quat[-1], quat_conjugate(self.ref_root_quat[-2])
-        )
-        self.ref_root_ang_vel[-1] = axis_angle_from_quat(
-            root_delta_quat_end
-        ) / motion_dt
+        root_delta_quat = quat_mul(self.ref_root_quat[2:], quat_conjugate(self.ref_root_quat[:-2]))
+        self.ref_root_ang_vel[1:-1] = axis_angle_from_quat(root_delta_quat) / (2 * motion_dt)
+        root_delta_quat_start = quat_mul(self.ref_root_quat[1], quat_conjugate(self.ref_root_quat[0]))
+        self.ref_root_ang_vel[0] = axis_angle_from_quat(root_delta_quat_start) / motion_dt
+        root_delta_quat_end = quat_mul(self.ref_root_quat[-1], quat_conjugate(self.ref_root_quat[-2]))
+        self.ref_root_ang_vel[-1] = axis_angle_from_quat(root_delta_quat_end) / motion_dt
 
         # Foot positions in the reference motion world frame.
         foot_pos_cols = [
@@ -355,13 +342,9 @@ class MotionLoader:
         self.num_joints = self.ref_joint_pos.shape[1]
 
         if self.length != REFERENCE_NUM_FRAMES:
-            raise ValueError(
-                f"Expected {REFERENCE_NUM_FRAMES} frames in reference motion, but found {self.length}."
-            )
+            raise ValueError(f"Expected {REFERENCE_NUM_FRAMES} frames in reference motion, but found {self.length}.")
         if self.num_joints != NUMBER_OF_JOINTS:
-            raise ValueError(
-                f"Expected {NUMBER_OF_JOINTS} joints in reference motion, but found {self.num_joints}."
-            )
+            raise ValueError(f"Expected {NUMBER_OF_JOINTS} joints in reference motion, but found {self.num_joints}.")
         print(f"Loaded reference motion from {self.csv_path}")
         print(f"Motion length: {self.length}, Number of joints: {self.num_joints}")
 
@@ -378,36 +361,22 @@ class MotionLoader:
         is_clamp = (idx_low >= self.length - 1).unsqueeze(-1)
 
         # Interpolate
-        interp_joint_pos = (1.0 - gradient) * self.ref_joint_pos[
-            idx_low
-        ] + gradient * self.ref_joint_pos[idx_high]
-        interp_root_pos = (1.0 - gradient) * self.ref_root_pos[
-            idx_low
-        ] + gradient * self.ref_root_pos[idx_high]
-        interp_foot_pos = (1.0 - gradient.unsqueeze(-1)) * self.ref_foot_pos[
-            idx_low
-        ] + gradient.unsqueeze(-1) * self.ref_foot_pos[idx_high]
-        interp_root_quat = slerp_quat(
-            self.ref_root_quat[idx_low], self.ref_root_quat[idx_high], gradient
-        )
+        interp_joint_pos = (1.0 - gradient) * self.ref_joint_pos[idx_low] + gradient * self.ref_joint_pos[idx_high]
+        interp_root_pos = (1.0 - gradient) * self.ref_root_pos[idx_low] + gradient * self.ref_root_pos[idx_high]
+        interp_foot_pos = (1.0 - gradient.unsqueeze(-1)) * self.ref_foot_pos[idx_low] + gradient.unsqueeze(
+            -1
+        ) * self.ref_foot_pos[idx_high]
+        interp_root_quat = slerp_quat(self.ref_root_quat[idx_low], self.ref_root_quat[idx_high], gradient)
 
-        interp_joint_vel = (1.0 - gradient) * self.ref_joint_vel[
-            idx_low
-        ] + gradient * self.ref_joint_vel[idx_high]
-        interp_root_vel = (1.0 - gradient) * self.ref_root_vel[
-            idx_low
-        ] + gradient * self.ref_root_vel[idx_high]
-        interp_root_ang_vel = (1.0 - gradient) * self.ref_root_ang_vel[
-            idx_low
-        ] + gradient * self.ref_root_ang_vel[idx_high]
+        interp_joint_vel = (1.0 - gradient) * self.ref_joint_vel[idx_low] + gradient * self.ref_joint_vel[idx_high]
+        interp_root_vel = (1.0 - gradient) * self.ref_root_vel[idx_low] + gradient * self.ref_root_vel[idx_high]
+        interp_root_ang_vel = (1.0 - gradient) * self.ref_root_ang_vel[idx_low] + gradient * self.ref_root_ang_vel[
+            idx_high
+        ]
 
         # Zero velocities if animation finished
-        interp_joint_vel = torch.where(
-            is_clamp, torch.zeros_like(interp_joint_vel), interp_joint_vel
-        )
-        interp_root_vel = torch.where(
-            is_clamp[..., :3], torch.zeros_like(interp_root_vel), interp_root_vel
-        )
+        interp_joint_vel = torch.where(is_clamp, torch.zeros_like(interp_joint_vel), interp_joint_vel)
+        interp_root_vel = torch.where(is_clamp[..., :3], torch.zeros_like(interp_root_vel), interp_root_vel)
         interp_root_ang_vel = torch.where(
             is_clamp[..., :3],
             torch.zeros_like(interp_root_ang_vel),
@@ -529,9 +498,7 @@ class JumpGoalCommand(CommandTerm):
         self.pose_command_w = torch.zeros(self.num_envs, 7, device=self.device)
         self.pose_command_w[:, 6] = 1.0
         self.target_displacement_w = torch.zeros(self.num_envs, 2, device=self.device)
-        self.target_yaw_displacement_w = torch.zeros(
-            self.num_envs, device=self.device
-        )
+        self.target_yaw_displacement_w = torch.zeros(self.num_envs, device=self.device)
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
@@ -550,12 +517,8 @@ class JumpGoalCommand(CommandTerm):
         euler_angles[:, 0].uniform_(*r.roll)  # c_psi
         euler_angles[:, 1].uniform_(*r.pitch)  # c_theta
         euler_angles[:, 2].uniform_(*r.yaw)  # c_phi
-        quat = quat_from_euler_xyz(
-            euler_angles[:, 0], euler_angles[:, 1], euler_angles[:, 2]
-        )
-        self.pose_command_b[env_ids, 3:] = (
-            quat_unique(quat) if self.cfg.make_quat_unique else quat
-        )
+        quat = quat_from_euler_xyz(euler_angles[:, 0], euler_angles[:, 1], euler_angles[:, 2])
+        self.pose_command_b[env_ids, 3:] = quat_unique(quat) if self.cfg.make_quat_unique else quat
 
         # Fetch current roots
         if (
@@ -564,21 +527,15 @@ class JumpGoalCommand(CommandTerm):
             and self.robot.data.root_pos_w.shape[0] == self.num_envs
             and self.robot.data.root_quat_w.shape[0] == self.num_envs
         ):
-            current_root_pos = warp_to_torch(self.robot.data.root_pos_w).to(
-                self.device
-            )[env_ids]
-            current_root_quat = warp_to_torch(self.robot.data.root_quat_w).to(
-                self.device
-            )[env_ids]
+            current_root_pos = warp_to_torch(self.robot.data.root_pos_w).to(self.device)[env_ids]
+            current_root_quat = warp_to_torch(self.robot.data.root_quat_w).to(self.device)[env_ids]
         else:
             # Fall back only for pre-initialization resampling; prefer real state when available.
             current_root_pos = torch.zeros((num_resampling, 3), device=self.device)
             if hasattr(self._env.scene, "env_origins"):
                 env_origins = warp_to_torch(self._env.scene.env_origins).to(self.device)
                 current_root_pos[:, :2] = env_origins[env_ids, :2]
-            initial_rot = torch.tensor(
-                self.robot.cfg.init_state.rot, device=self.device
-            )
+            initial_rot = torch.tensor(self.robot.cfg.init_state.rot, device=self.device)
             current_root_quat = initial_rot.unsqueeze(0).expand(num_resampling, -1)
 
         # Convert to world frame
@@ -594,9 +551,7 @@ class JumpGoalCommand(CommandTerm):
         _, _, goal_yaw = euler_xyz_from_quat(quat_w)
         _, _, root_yaw = euler_xyz_from_quat(current_root_quat)
         delta = goal_yaw - root_yaw
-        self.target_yaw_displacement_w[env_ids] = torch.atan2(
-            torch.sin(delta), torch.cos(delta)
-        )
+        self.target_yaw_displacement_w[env_ids] = torch.atan2(torch.sin(delta), torch.cos(delta))
 
         # Query terrain height at the target (x, y) position and set cz accordingly
         self.pose_command_w[env_ids, 2] = self._query_terrain_height(
@@ -615,18 +570,12 @@ class JumpGoalCommand(CommandTerm):
             current_pos_w = warp_to_torch(self.robot.data.root_pos_w)[:, :3]
         else:
             if hasattr(self._env.scene, "env_origins"):
-                current_pos_w = warp_to_torch(self._env.scene.env_origins).to(
-                    self.device
-                )
+                current_pos_w = warp_to_torch(self._env.scene.env_origins).to(self.device)
             else:
                 current_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
-        self.metrics["position_error"] = torch.linalg.norm(
-            self.pose_command_w[:, :2] - current_pos_w[:, :2], dim=-1
-        )
+        self.metrics["position_error"] = torch.linalg.norm(self.pose_command_w[:, :2] - current_pos_w[:, :2], dim=-1)
 
-    def _query_terrain_height(
-        self, x_targets: torch.Tensor, y_targets: torch.Tensor
-    ) -> torch.Tensor:
+    def _query_terrain_height(self, x_targets: torch.Tensor, y_targets: torch.Tensor) -> torch.Tensor:
         """Return terrain heights at target positions.
 
         Args:
@@ -732,9 +681,7 @@ def reference_state_initialization(
     std_env_ids = env_ids[~do_rsi]
 
     if len(rsi_env_ids) > 0:
-        random_frame_ids = torch.randint(
-            0, loader.length, (len(rsi_env_ids),), device=env.device
-        )
+        random_frame_ids = torch.randint(0, loader.length, (len(rsi_env_ids),), device=env.device)
         start_times = random_frame_ids / REFERENCE_MOTION_FPS
         if not hasattr(env, "start_times"):
             env.start_times = torch.zeros(env.num_envs, device=env.device)
@@ -751,9 +698,7 @@ def reference_state_initialization(
             joint_ids, _ = asset.find_joints(loader.joint_names, preserve_order=True)
             loader.joint_ids = torch.tensor(joint_ids, device=env.device)
 
-        init_joint_pos = warp_to_torch(asset.data.default_joint_pos)[
-            rsi_env_ids
-        ].clone()
+        init_joint_pos = warp_to_torch(asset.data.default_joint_pos)[rsi_env_ids].clone()
         init_joint_pos[:, loader.joint_ids] = ref_joint_pos
         init_joint_vel = torch.zeros_like(init_joint_pos)
         init_joint_vel[:, loader.joint_ids] = ref_joint_vel
@@ -766,47 +711,27 @@ def reference_state_initialization(
         init_root_vel[:, :3] = ref_root_vel
         init_root_vel[:, 3:] = ref_root_ang_vel
 
-        asset.write_joint_position_to_sim_index(
-            position=init_joint_pos, env_ids=rsi_env_ids
-        )
-        asset.write_joint_velocity_to_sim_index(
-            velocity=init_joint_vel, env_ids=rsi_env_ids
-        )
-        asset.write_root_pose_to_sim_index(
-            root_pose=init_root_pose, env_ids=rsi_env_ids
-        )
+        asset.write_joint_position_to_sim_index(position=init_joint_pos, env_ids=rsi_env_ids)
+        asset.write_joint_velocity_to_sim_index(velocity=init_joint_vel, env_ids=rsi_env_ids)
+        asset.write_root_pose_to_sim_index(root_pose=init_root_pose, env_ids=rsi_env_ids)
         # Reference velocities are link-derived, so use the matching link-frame writer.
-        asset.write_root_link_velocity_to_sim_index(
-            root_velocity=init_root_vel, env_ids=rsi_env_ids
-        )
+        asset.write_root_link_velocity_to_sim_index(root_velocity=init_root_vel, env_ids=rsi_env_ids)
 
     if len(std_env_ids) > 0:
         if not hasattr(env, "start_times"):
             env.start_times = torch.zeros(env.num_envs, device=env.device)
         env.start_times[std_env_ids] = 0.0
 
-        default_joint_pos = warp_to_torch(asset.data.default_joint_pos)[
-            std_env_ids
-        ].clone()
+        default_joint_pos = warp_to_torch(asset.data.default_joint_pos)[std_env_ids].clone()
         default_joint_vel = torch.zeros_like(default_joint_pos)
-        default_root_pose = warp_to_torch(asset.data.default_root_pose)[
-            std_env_ids
-        ].clone()
+        default_root_pose = warp_to_torch(asset.data.default_root_pose)[std_env_ids].clone()
         default_root_pose[:, :3] += env.scene.env_origins[std_env_ids]
         default_root_vel = torch.zeros((len(std_env_ids), 6), device=env.device)
 
-        asset.write_joint_position_to_sim_index(
-            position=default_joint_pos, env_ids=std_env_ids
-        )
-        asset.write_joint_velocity_to_sim_index(
-            velocity=default_joint_vel, env_ids=std_env_ids
-        )
-        asset.write_root_pose_to_sim_index(
-            root_pose=default_root_pose, env_ids=std_env_ids
-        )
-        asset.write_root_velocity_to_sim_index(
-            root_velocity=default_root_vel, env_ids=std_env_ids
-        )
+        asset.write_joint_position_to_sim_index(position=default_joint_pos, env_ids=std_env_ids)
+        asset.write_joint_velocity_to_sim_index(velocity=default_joint_vel, env_ids=std_env_ids)
+        asset.write_root_pose_to_sim_index(root_pose=default_root_pose, env_ids=std_env_ids)
+        asset.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=std_env_ids)
 
 
 # =============================================================================
@@ -864,9 +789,7 @@ def track_root_vel_z(env, gradient, phase_weights):
     _, _, _, ref_root_vel, _, _, _ = get_loader(env).get_state(current_time)
     ref_root_vel_z = ref_root_vel[:, 2:3]
     # Reference velocity is link-derived, so use the matching link-frame accessor.
-    current_root_vel_z = warp_to_torch(
-        env.scene["robot"].data.root_link_lin_vel_w
-    )[:, 2:3]
+    current_root_vel_z = warp_to_torch(env.scene["robot"].data.root_link_lin_vel_w)[:, 2:3]
 
     r = get_reward(current_root_vel_z, ref_root_vel_z, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -887,9 +810,7 @@ def track_root_angular_rate(env, gradient, phase_weights):
     current_time = get_env_time(env)
     _, _, _, _, _, ref_root_ang_vel, _ = get_loader(env).get_state(current_time)
     # Reference velocity is link-derived, so use the matching link-frame accessor.
-    current_root_ang_vel = warp_to_torch(
-        env.scene["robot"].data.root_link_ang_vel_w
-    )
+    current_root_ang_vel = warp_to_torch(env.scene["robot"].data.root_link_ang_vel_w)
 
     r = get_reward(current_root_ang_vel, ref_root_ang_vel, gradient)
     return r * get_phase_weight(env, phase_weights)
@@ -899,9 +820,7 @@ def track_foot_z(env, gradient, phase_weights):
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
-        env, loader, robot, current_time
-    )
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(env, loader, robot, current_time)
 
     r = get_reward(
         current_foot_pos_rel[..., 2],
@@ -915,9 +834,7 @@ def track_foot_xy(env, gradient, phase_weights):
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
-        env, loader, robot, current_time
-    )
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(env, loader, robot, current_time)
 
     r = get_reward(
         current_foot_pos_rel[..., :2].reshape(env.num_envs, -1),
@@ -938,16 +855,12 @@ def target_position(env, gradient, phase_weights):
 def target_velocity(env, gradient, phase_weights):
     current_vel_xy = warp_to_torch(env.scene["robot"].data.root_lin_vel_w)[:, :2]
     active_frames = sum(
-        end - start
-        for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values())
-        if weight != 0.0
+        end - start for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values()) if weight != 0.0
     )
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:
         return torch.zeros(env.num_envs, device=env.device)
-    target_displacement_xy = env.command_manager.get_term(
-        "jump_goal"
-    ).target_displacement_w
+    target_displacement_xy = env.command_manager.get_term("jump_goal").target_displacement_w
     target_vel_xy = target_displacement_xy / active_duration_s
 
     r = get_reward(current_vel_xy, target_vel_xy, gradient)
@@ -967,16 +880,12 @@ def target_orientation(env, gradient, phase_weights):
 def target_angular_rate(env, gradient, phase_weights):
     current_ang_vel = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)
     active_frames = sum(
-        end - start
-        for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values())
-        if weight != 0.0
+        end - start for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values()) if weight != 0.0
     )
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:
         return torch.zeros(env.num_envs, device=env.device)
-    target_yaw_displacement = env.command_manager.get_term(
-        "jump_goal"
-    ).target_yaw_displacement_w
+    target_yaw_displacement = env.command_manager.get_term("jump_goal").target_yaw_displacement_w
     target_ang_vel = torch.zeros(env.num_envs, 3, device=env.device)
     target_ang_vel[:, 2] = target_yaw_displacement / active_duration_s
 
@@ -990,9 +899,7 @@ def penalize_ground_impact(env, gradient, phase_weights):
         contact_sensor = env.scene.sensors[sensor_name]
         forces = contact_sensor.data.net_forces_w
         forces_t = warp_to_torch(forces)
-        fz_total += torch.sum(
-            torch.abs(forces_t[..., 2]).reshape(env.num_envs, -1), dim=1, keepdim=True
-        )
+        fz_total += torch.sum(torch.abs(forces_t[..., 2]).reshape(env.num_envs, -1), dim=1, keepdim=True)
     r = get_reward(fz_total, torch.zeros_like(fz_total), gradient)
     return r * get_phase_weight(env, phase_weights)
 
@@ -1050,9 +957,7 @@ def foot_tracking_error(
     loader = get_loader(env)
     robot = env.scene["robot"]
     current_time = get_env_time(env)
-    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(
-        env, loader, robot, current_time
-    )
+    current_foot_pos_rel, ref_foot_pos_rel = get_root_relative_foot_pos(env, loader, robot, current_time)
 
     error = torch.linalg.norm(current_foot_pos_rel - ref_foot_pos_rel, dim=-1)
     terminated = torch.any(error > threshold, dim=-1)
@@ -1085,11 +990,7 @@ def task_completion_error(
     _, _, current_yaw = euler_xyz_from_quat(current_quat)
     _, _, target_yaw = euler_xyz_from_quat(target_quat)
 
-    yaw_error = torch.abs(
-        torch.atan2(
-            torch.sin(current_yaw - target_yaw), torch.cos(current_yaw - target_yaw)
-        )
-    )
+    yaw_error = torch.abs(torch.atan2(torch.sin(current_yaw - target_yaw), torch.cos(current_yaw - target_yaw)))
 
     error_exceeded = (pos_error > pos_threshold) | (yaw_error > yaw_threshold)
     phase_exceeded = current_phase >= get_phase_id(start_phase)
@@ -1117,44 +1018,20 @@ class G1JumpSceneCfg(InteractiveSceneCfg):
             joint_pos={},
         ),
     )
-    contact_forces_left_foot = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_foot"]
-    )
-    contact_forces_right_foot = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_foot"]
-    )
+    contact_forces_left_foot = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_foot"])
+    contact_forces_right_foot = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_foot"])
     contact_forces_pelvis = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["pelvis"])
-    contact_forces_left_thigh = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_thigh"]
-    )
-    contact_forces_left_shin = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_shin"]
-    )
-    contact_forces_right_thigh = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_thigh"]
-    )
-    contact_forces_right_shin = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_shin"]
-    )
+    contact_forces_left_thigh = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_thigh"])
+    contact_forces_left_shin = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_shin"])
+    contact_forces_right_thigh = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_thigh"])
+    contact_forces_right_shin = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_shin"])
     contact_forces_torso = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["torso"])
-    contact_forces_left_upper_arm = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_upper_arm"]
-    )
-    contact_forces_left_lower_arm = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_lower_arm"]
-    )
-    contact_forces_left_hand = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["left_hand"]
-    )
-    contact_forces_right_upper_arm = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_upper_arm"]
-    )
-    contact_forces_right_lower_arm = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_lower_arm"]
-    )
-    contact_forces_right_hand = set_contact_sensor(
-        CONTACT_SENSOR_PRIM_PATHS["right_hand"]
-    )
+    contact_forces_left_upper_arm = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_upper_arm"])
+    contact_forces_left_lower_arm = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_lower_arm"])
+    contact_forces_left_hand = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["left_hand"])
+    contact_forces_right_upper_arm = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_upper_arm"])
+    contact_forces_right_lower_arm = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_lower_arm"])
+    contact_forces_right_hand = set_contact_sensor(CONTACT_SENSOR_PRIM_PATHS["right_hand"])
     sky_light = AssetBaseCfg(
         prim_path="/World/skyLight",
         spawn=None,  # To be set in __post_init__ to avoid circular imports
