@@ -410,6 +410,60 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
 
 
 @configclass
+class G1JumpStage2EnvCfg(G1JumpEnvCfg):
+    """Multi-goal jump training.
+
+    Stage 1 fixes the goal at the origin with no turn, so the policy only has to imitate the
+    reference. Here the goal is resampled per episode and the policy has to reach it, which
+    changes what the reference is good for: it was recorded as an in-place jump, so the terms
+    that track its heading and its foot ground track now describe a motion the robot is being
+    asked *not* to perform. Those are dropped in favour of the task terms, following the
+    weight shift in Table II of Li et al. (2023).
+
+    Dynamics randomization belongs to stage 3 and is deliberately absent here.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Flat-ground policy: position and turning vary, elevation does not. The paper trains
+        # elevation as a separate policy, and _query_terrain_height only supports flat ground.
+        # These are about a third of the paper's ranges (it uses +/-1.5 m and +/-100 deg on a
+        # robot it had already trained through this stage); widen once the policy holds up.
+        self.commands.jump_goal.ranges.pos_x = (-0.4, 0.4)
+        self.commands.jump_goal.ranges.pos_y = (-0.3, 0.3)
+        self.commands.jump_goal.ranges.yaw = (-30.0 * torch.pi / 180.0, 30.0 * torch.pi / 180.0)
+
+        # The reference motion cannot describe where the robot was told to go, so the terms
+        # that would hold it on the reference's heading and ground track are switched off.
+        # Their task-space counterparts below take over.
+        self.rewards.track_root_orientation.params["phase_weights"] = (0.0,) * 6
+        self.rewards.track_root_angular_rate.params["phase_weights"] = (0.0,) * 6
+        self.rewards.track_foot_xy.params["phase_weights"] = (0.0,) * 6
+
+        # Halve joint-position tracking before landing so the policy can deviate from the
+        # in-place posture to travel, while keeping it after landing where the reference
+        # still describes the pose we want (Table II: 15 -> 7.5 before, 15 after).
+        self.rewards.track_joint_pos.params["phase_weights"] = (6.0, 8.0, 9.0, 6.0, 14.0, 16.0)
+
+        # Heading is now a task, not an imitation target. Orientation is weighted towards
+        # landing and standing where the commanded turn must actually hold; angular rate is
+        # weighted towards take-off and flight, which is when the turn is executed.
+        self.rewards.target_orientation.params["phase_weights"] = (0.0, 1.0, 2.0, 3.0, 6.0, 8.0)
+        self.rewards.target_angular_rate.params["phase_weights"] = (0.0, 2.0, 4.0, 3.0, 2.0, 0.0)
+
+
+@configclass
+class G1JumpStage2EnvCfg_PLAY(G1JumpStage2EnvCfg):
+    actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.observations.policy.enable_corruption = True
+
+
+@configclass
 class G1JumpEnvCfg_PLAY(G1JumpEnvCfg):
     actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
 
