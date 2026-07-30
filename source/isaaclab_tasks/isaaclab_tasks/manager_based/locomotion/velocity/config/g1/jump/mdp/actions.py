@@ -3,6 +3,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""Filtered joint position action term for the G1 jump task."""
+
 from __future__ import annotations
 
 from collections.abc import Sequence
@@ -11,12 +13,21 @@ from typing import TYPE_CHECKING
 import torch
 
 import isaaclab.utils.string as string_utils
+from isaaclab.envs.mdp import JointPositionActionCfg
 from isaaclab.envs.mdp.actions import JointPositionAction
+from isaaclab.utils.configclass import configclass
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
-    from .jump_env_cfg import LowPassJointPositionActionCfg
+
+@configclass
+class LowPassJointPositionActionCfg(JointPositionActionCfg):
+    """Configuration for filtered joint position targets."""
+
+    class_type: type | str = "{DIR}.actions:LowPassJointPositionAction"
+    alpha: float | dict[str, float] = 1.0
+    """New-target weight; lower values apply stronger low-pass filtering."""
 
 
 class LowPassJointPositionAction(JointPositionAction):
