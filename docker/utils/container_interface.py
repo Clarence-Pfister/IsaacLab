@@ -136,8 +136,7 @@ class ContainerInterface:
             if "no such container" in result.stderr.lower():
                 return False
             raise RuntimeError(
-                f"Failed to query the container '{self.container_name}' through Docker:\n"
-                f"  {result.stderr.strip()}"
+                f"Failed to query the container '{self.container_name}' through Docker:\n  {result.stderr.strip()}"
             )
         return result.stdout.strip() == "running"
 
@@ -164,8 +163,7 @@ class ContainerInterface:
             if "no such image" in result.stderr.lower():
                 return False
             raise RuntimeError(
-                f"Failed to query the image '{self.image_name}' through Docker:\n"
-                f"  {result.stderr.strip()}"
+                f"Failed to query the image '{self.image_name}' through Docker:\n  {result.stderr.strip()}"
             )
         return True
 
@@ -210,8 +208,7 @@ class ContainerInterface:
             path.mkdir(parents=True, exist_ok=True)
             if not os.access(path, os.W_OK):
                 raise PermissionError(
-                    f"Bind-mount source is not writable: {path}. "
-                    "Repair its ownership before starting the container."
+                    f"Bind-mount source is not writable: {path}. Repair its ownership before starting the container."
                 )
 
         # build the image for the base profile if not running base (up will build base already if profile is base)
