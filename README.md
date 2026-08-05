@@ -43,11 +43,33 @@ Isaac Lab and Isaac Sim versions are coupled. Do not change one without checking
 
 | Task ID | Purpose | Default experiment |
 | --- | --- | --- |
-| `Isaac-Velocity-Jump-G1-v0` | Train the reference-motion jump | `g1_jump` |
-| `Isaac-Velocity-Jump-G1-Play-v0` | Evaluate a jump checkpoint | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-v0` | Stage 1: imitate the reference jump, goal fixed at the origin | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Play-v0` | Evaluate a stage 1 checkpoint | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Stage2-v0` | Stage 2: jump to a goal resampled each episode | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Stage2-Play-v0` | Evaluate a stage 2 checkpoint, with the goal drawn | `g1_jump` |
 
 The task registrations are in
 [`config/g1/__init__.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/__init__.py).
+
+### Training stages
+
+The task follows the multi-stage scheme of [Li et al., *Robust and Versatile Bipedal Jumping Control
+through Reinforcement Learning* (2023)](https://arxiv.org/abs/2302.09450): learn one jump first, then
+generalize it to arbitrary goals. Each stage is a config subclass registered as its own task, so the
+stage travels with `--task` and needs no extra flag.
+
+| | Stage 1 | Stage 2 |
+| --- | --- | --- |
+| Goal | fixed at the origin, no turn | `pos_x` ±0.4 m, `pos_y` ±0.3 m, `yaw` ±30° per episode |
+| Reference tracking | full weight | heading, angular rate and foot ground track dropped; joint position halved before landing |
+| Task reward | position and velocity only | plus orientation and angular rate |
+| Elevation | flat | flat (the paper trains elevation as a separate policy) |
+
+Both stages share the 165-wide observation — stage 1 simply sees a goal of all zeros — so a stage 2
+run can warm-start from a stage 1 checkpoint. They also share the `g1_jump` experiment directory,
+which is what makes that warm start straightforward.
+
+Stage 3 (dynamics randomization) is not implemented.
 
 ## Branches
 
@@ -66,10 +88,36 @@ if the container fixes are wanted, and combine on a new integration branch.
 
 ## Repository map
 
+The jump task is a package under
+[`config/g1/jump/`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump),
+laid out like the `mdp` packages upstream uses:
+
 | Path | Contents |
 | --- | --- |
-| [`jump_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump_env_cfg.py) | Jump robot, motion loader, observations, rewards, events, and terminations |
+| [`jump/constants.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/constants.py) | Asset paths, joint layout, action scales, actuators, motion phases |
+| [`jump/jump_env_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/jump_env_cfg.py) | Scene, observation, reward and termination configs, and the stage classes |
+| [`jump/mdp/motion.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/mdp/motion.py) | Reference-motion loader, interpolation, phase helpers |
+| [`jump/mdp/rewards.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/mdp/rewards.py) | Tracking, task-completion and smoothing reward terms |
+| [`jump/mdp/terminations.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/mdp/terminations.py) | Reference exhaustion, ground contact, tracking and task-completion bounds |
+| [`jump/mdp/commands.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/mdp/commands.py) | Goal command term and its visualization marker |
+| [`jump/mdp/`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/jump/mdp) | Also observations, events, and the filtered action term |
 | [`rsl_rl_ppo_cfg.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/agents/rsl_rl_ppo_cfg.py) | PPO runner configurations |
+
+> **When editing this package, keep USD out of the import path.** `import isaaclab_tasks` walks every
+> subpackage, and task configs are resolved by hydra, both before `SimulationApp` starts. Importing
+> USD that early aborts the process with `free(): invalid pointer` — for every task, not just this
+> one. So `jump/__init__.py` re-exports nothing, and `jump/mdp/__init__.py` exposes the action
+> *config* but not the action class, whose base lazy-loads `Articulation`. Runtime classes are
+> reached from their `class_type` strings once the app is running. To check a change is safe:
+>
+> ```bash
+> ./isaaclab.sh -p -c "import sys, isaaclab_tasks; \
+>   from isaaclab_tasks.utils.parse_cfg import load_cfg_from_registry; \
+>   load_cfg_from_registry('Isaac-Velocity-Jump-G1-Stage2-v0', 'env_cfg_entry_point'); \
+>   print('pxr modules:', len([m for m in sys.modules if m.startswith('pxr')]))"
+> ```
+>
+> It must print `0`.
 | [`data_storage/`](data_storage) | G1 MJCF, meshes, processed reference CSV, and generated USD location |
 | [`docker/.env.base`](docker/.env.base) | Isaac Sim image, container naming, and streaming host settings |
 | [`docker/docker-compose.yaml`](docker/docker-compose.yaml) | Container services and host bind mounts |
@@ -109,9 +157,11 @@ ISAACSIM_HOST=<GPU_HOST_IP>
 
 The image and container name suffix is not set here. It comes from the `--suffix` argument of
 [`docker/container.py`](docker/container.py), which exports `DOCKER_NAME_SUFFIX` to Compose itself; setting it in
-`.env.base` as well would be redundant and can disagree with the value the script uses. The argument has no
-default, so pass `--suffix custom` consistently to every `container.py` call, as the commands below do. An
-inconsistent suffix is the usual cause of "the container is not running" when it plainly is.
+`.env.base` as well would be redundant and can disagree with the value the script uses. On `integration/all`
+the argument defaults to `custom` (the default comes from `fix/docker`), so the commands below pass
+`--suffix custom` explicitly to stay correct on any branch. Whatever value you use, use the same one for
+`build`, `start`, `enter`, and `stop`: an inconsistent suffix is the usual cause of "the container is not
+running" when it plainly is.
 
 Replace `<GPU_HOST_IP>` with the GPU machine address that the streaming client can reach. Keep the EULA enabled only
 after reviewing and accepting the NVIDIA Omniverse license terms. Avoid committing private hostnames, credentials, or
@@ -197,14 +247,38 @@ The jump runner defaults to 100,000 iterations and saves every 500 iterations. O
 
 ### Resume training
 
+`--resume` is a flag and is required — `--load_run` and `--checkpoint` alone load nothing. `--load_run`
+takes a run directory *name* under the experiment directory, and `--checkpoint` a file name within it.
+
 ```bash
 ./isaaclab.sh train \
   --rl_library rsl_rl \
   --task Isaac-Velocity-Jump-G1-v0 \
   --resume \
-  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
+  --load_run RUN_DIRECTORY \
+  --checkpoint model_ITERATION.pt \
   --viz none
 ```
+
+### Start stage 2 from a stage 1 checkpoint
+
+Stage 2 is a fresh run that continues from stage 1's weights, which works because both stages share
+the observation width and the experiment directory:
+
+```bash
+./isaaclab.sh train \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-Stage2-v0 \
+  --resume \
+  --load_run STAGE1_RUN_DIRECTORY \
+  --checkpoint model_ITERATION.pt \
+  --max_iterations 6000 \
+  --run_name stage2 \
+  --viz none
+```
+
+Expect the reward to drop sharply at iteration 0. Stage 2 zeroes three reference-tracking terms and
+enables two task terms, so the scale changes; what matters is that it climbs from there.
 
 ## Evaluate a checkpoint
 
@@ -217,7 +291,27 @@ The jump runner defaults to 100,000 iterations and saves every 500 iterations. O
   --viz kit
 ```
 
-If `--checkpoint` is omitted, Isaac Lab selects the latest checkpoint under the task's experiment directory.
+If `--checkpoint` is omitted, Isaac Lab selects the latest checkpoint under the task's experiment
+directory. Because every jump task shares `g1_jump`, the newest run wins regardless of which stage
+produced it — a two-iteration smoke test will be picked over a finished run and the robot will appear
+frozen in its start pose. Name the run explicitly with `--load_run`, and send throwaway runs somewhere
+else with `--experiment_name g1_jump_scratch`.
+
+Stage 2 play draws the commanded landing pose as a frame triad, so a missed landing can be told apart
+from a goal that moved:
+
+```bash
+./isaaclab.sh play \
+  --rl_library rsl_rl \
+  --task Isaac-Velocity-Jump-G1-Stage2-Play-v0 \
+  --load_run RUN_DIRECTORY \
+  --checkpoint model_ITERATION.pt \
+  --viz kit
+```
+
+The marker shows the goal in world frame, so its heading is the robot's starting yaw plus the
+commanded turn — a triad past ±30° is expected, not a bug. `--viz kit` needs a display and so does not
+work over plain SSH; record with `--viz none --video` instead.
 
 ### Record video
 
