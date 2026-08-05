@@ -699,9 +699,9 @@ def activate_contact_sensors(prim_path: str, threshold: float = 0.0, stage: Usd.
             safe_set_attribute_on_usd_prim(child_prim, "physxContactReport:threshold", threshold, camel_case=False)
             # increment number of contact sensors
             num_contact_sensors += 1
-        else:
-            # add all children to tree
-            all_prims += child_prim.GetChildren()
+        # add all children to tree (also for rigid-body prims, so that nested
+        # rigid bodies inside an articulation link receive contact sensors too)
+        all_prims += child_prim.GetChildren()
     # check if no contact sensors were found
     if num_contact_sensors == 0:
         descendant_count = 0

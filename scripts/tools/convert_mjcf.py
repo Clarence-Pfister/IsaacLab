@@ -77,8 +77,13 @@ args_cli = parser.parse_args()
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
 
-"""Rest everything follows."""
+# enable the MJCF importer extension
+import omni.kit.app
 
+ext_manager = omni.kit.app.get_app().get_extension_manager()
+ext_manager.set_extension_enabled_immediate("isaacsim.asset.importer.mjcf", True)
+
+"""Rest everything follows."""
 import contextlib
 import os
 
