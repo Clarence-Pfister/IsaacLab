@@ -5,7 +5,7 @@
 
 """MDP terms specific to the G1 jump task."""
 
-from .actions import LowPassJointPositionAction, LowPassJointPositionActionCfg
+from .actions_cfg import LowPassJointPositionActionCfg
 from .commands import JumpGoalCommand, JumpGoalCommandCfg
 from .events import reference_state_initialization
 from .motion import (
