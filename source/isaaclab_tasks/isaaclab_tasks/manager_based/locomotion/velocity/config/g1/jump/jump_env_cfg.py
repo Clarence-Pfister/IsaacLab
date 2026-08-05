@@ -461,6 +461,10 @@ class G1JumpStage2EnvCfg_PLAY(G1JumpStage2EnvCfg):
         super().__post_init__()
         self.scene.num_envs = 50
         self.observations.policy.enable_corruption = True
+        # Each episode draws a different target, so without a marker there is no way to tell a
+        # missed landing from a goal that moved. Only enabled for play: the marker costs draw
+        # calls and training is headless.
+        self.commands.jump_goal.debug_vis = True
 
 
 @configclass

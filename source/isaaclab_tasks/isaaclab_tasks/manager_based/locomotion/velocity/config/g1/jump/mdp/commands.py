@@ -13,6 +13,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.managers import CommandTerm, CommandTermCfg
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
+from isaaclab.markers.config import FRAME_MARKER_CFG
 from isaaclab.utils.configclass import configclass
 from isaaclab.utils.math import (
     combine_frame_transforms,
@@ -147,6 +149,23 @@ class JumpGoalCommand(CommandTerm):
     def command(self) -> torch.Tensor:
         return self.pose_command_w
 
+    def _set_debug_vis_impl(self, debug_vis: bool):
+        if debug_vis:
+            if not hasattr(self, "goal_pose_visualizer"):
+                self.goal_pose_visualizer = VisualizationMarkers(self.cfg.goal_pose_visualizer_cfg)
+            self.goal_pose_visualizer.set_visibility(True)
+        elif hasattr(self, "goal_pose_visualizer"):
+            self.goal_pose_visualizer.set_visibility(False)
+
+    def _debug_vis_callback(self, event):
+        # The command is resampled on reset, before the articulation exists on the first frame.
+        if not self.robot.is_initialized:
+            return
+        # Lift the marker clear of the ground plane so the triad is not half-buried in it.
+        marker_pos = self.pose_command_w[:, :3].clone()
+        marker_pos[:, 2] += self.cfg.goal_marker_height
+        self.goal_pose_visualizer.visualize(marker_pos, self.pose_command_w[:, 3:])
+
 
 @configclass
 class JumpGoalCommandCfg(CommandTermCfg):
@@ -167,3 +186,15 @@ class JumpGoalCommandCfg(CommandTermCfg):
         yaw = (0.0, 0.0)  # c_phi
 
     ranges: Ranges = Ranges()
+
+    goal_pose_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/jump_goal")
+    """Marker drawn at the commanded landing pose when ``debug_vis`` is set.
+
+    A frame triad rather than a sphere: the goal carries a turn as well as a position, and only
+    an oriented marker shows whether the robot finished facing where it was told to.
+    """
+
+    goal_marker_height: float = 0.05
+    """Height above the goal at which the marker is drawn [m]."""
+
+    goal_pose_visualizer_cfg.markers["frame"].scale = (0.25, 0.25, 0.25)
