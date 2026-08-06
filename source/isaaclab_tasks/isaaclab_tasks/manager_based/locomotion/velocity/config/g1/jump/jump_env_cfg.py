@@ -454,6 +454,49 @@ class G1JumpStage2EnvCfg(G1JumpEnvCfg):
 
 
 @configclass
+class G1JumpStage2WideEnvCfg(G1JumpStage2EnvCfg):
+    """Stage 2 at roughly two thirds of the paper's goal ranges.
+
+    Kept as its own task rather than widening stage 2 in place so the narrower policy stays
+    reproducible. The forward bias in ``pos_x`` follows the paper, which samples U(-0.5, 1.5):
+    a jump forward is the case the task is really about, and a backward jump of the same size
+    is harder for a robot whose reference motion travels nowhere.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.3, 1.0)
+        self.commands.jump_goal.ranges.pos_y = (-0.6, 0.6)
+        self.commands.jump_goal.ranges.yaw = (-60.0 * torch.pi / 180.0, 60.0 * torch.pi / 180.0)
+
+        # The task reward kernels are exp(-k * squared error), so k is only meaningful relative
+        # to the errors actually seen. Both were calibrated for the narrow ranges and go flat
+        # over the wider ones: at the 0.62 m rms distance of an unmoved robot, position scores
+        # 3e-4 and supplies essentially no gradient. Re-scale both so the kernel at that
+        # distance matches what the narrow stage saw at its own rms distance (0.24).
+        self.rewards.target_position.params["gradient"] = 3.72
+        self.rewards.target_orientation.params["gradient"] = 6.0
+
+        # With goals up to 1.17 m away the stage 1 bound of 1.0 m was unreachable in the wrong
+        # direction and vacuous in every other; tighten to the paper's stage 2 values so a
+        # landing that misses is actually terminated.
+        self.terminations.task_completion_error.params["pos_threshold"] = 0.35
+        self.terminations.task_completion_error.params["yaw_threshold"] = 35.0 * (torch.pi / 180.0)
+
+
+@configclass
+class G1JumpStage2WideEnvCfg_PLAY(G1JumpStage2WideEnvCfg):
+    actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.observations.policy.enable_corruption = True
+        self.commands.jump_goal.debug_vis = True
+
+
+@configclass
 class G1JumpStage2EnvCfg_PLAY(G1JumpStage2EnvCfg):
     actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
 
