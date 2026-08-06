@@ -75,3 +75,11 @@ class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
         self.num_steps_per_env = 32
         self.algorithm.learning_rate = 5e-5
         self.algorithm.num_mini_batches = 4
+        # Down from the 0.008 inherited from the rough-terrain config. The loss is
+        # surrogate + value - entropy_coef * entropy, so once the task gradient is spent the
+        # entropy bonus is the only term left that can still improve the objective, and PPO
+        # collects it by widening the action distribution. Late in the wide stage 2 run that
+        # cost 5% of the return: mean_std rose 1.63 -> 2.15 while every velocity-sensitive
+        # term fell (joint velocity tracking -51%, angular rate -41%) and every position term
+        # held flat, which is jitter rather than a policy that forgot the task.
+        self.algorithm.entropy_coef = 0.002
