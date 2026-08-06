@@ -101,3 +101,25 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
     },
 )
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Wide-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2WideEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Wide-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2WideEnvCfg_PLAY",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)

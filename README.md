@@ -47,6 +47,8 @@ Isaac Lab and Isaac Sim versions are coupled. Do not change one without checking
 | `Isaac-Velocity-Jump-G1-Play-v0` | Evaluate a stage 1 checkpoint | `g1_jump` |
 | `Isaac-Velocity-Jump-G1-Stage2-v0` | Stage 2: jump to a goal resampled each episode | `g1_jump` |
 | `Isaac-Velocity-Jump-G1-Stage2-Play-v0` | Evaluate a stage 2 checkpoint, with the goal drawn | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Stage2-Wide-v0` | Stage 2 at wider goal ranges and a tighter arrival bound | `g1_jump` |
+| `Isaac-Velocity-Jump-G1-Stage2-Wide-Play-v0` | Evaluate a wide stage 2 checkpoint | `g1_jump` |
 
 The task registrations are in
 [`config/g1/__init__.py`](source/isaaclab_tasks/isaaclab_tasks/manager_based/locomotion/velocity/config/g1/__init__.py).
@@ -58,12 +60,21 @@ through Reinforcement Learning* (2023)](https://arxiv.org/abs/2302.09450): learn
 generalize it to arbitrary goals. Each stage is a config subclass registered as its own task, so the
 stage travels with `--task` and needs no extra flag.
 
-| | Stage 1 | Stage 2 |
-| --- | --- | --- |
-| Goal | fixed at the origin, no turn | `pos_x` ±0.4 m, `pos_y` ±0.3 m, `yaw` ±30° per episode |
-| Reference tracking | full weight | heading, angular rate and foot ground track dropped; joint position halved before landing |
-| Task reward | position and velocity only | plus orientation and angular rate |
-| Elevation | flat | flat (the paper trains elevation as a separate policy) |
+| | Stage 1 | Stage 2 | Stage 2 wide |
+| --- | --- | --- | --- |
+| Goal | fixed at the origin, no turn | `pos_x` ±0.4 m, `pos_y` ±0.3 m, `yaw` ±30° | `pos_x` −0.3…1.0 m, `pos_y` ±0.6 m, `yaw` ±60° |
+| Reference tracking | full weight | heading, angular rate and foot ground track dropped; joint position halved before landing | as stage 2 |
+| Task reward | position and velocity only | plus orientation and angular rate | as stage 2, kernels rescaled for the range |
+| Arrival bound | 1.0 m / 45° | 1.0 m / 45° | 0.35 m / 35° |
+| Elevation | flat | flat (the paper trains elevation as a separate policy) | flat |
+
+The wide stage is a separate task rather than an edit to stage 2, so a working narrow policy stays
+reproducible. Two things change with the range beyond the ranges themselves. The task reward kernels
+are `exp(-k · squared error)`, so `k` only means something relative to the errors actually seen: at
+stage 2's `k = 21.07`, a robot standing still 0.62 m from its goal scores 3e-4 and gets essentially no
+gradient, so position and orientation are rescaled to 3.72 and 6.0. And the arrival bound tightens to
+the paper's stage 2 values — at ±0.4 m goals a 1.0 m bound could not be violated even by a robot that
+never moved, so it was not testing anything.
 
 Both stages share the 165-wide observation — stage 1 simply sees a goal of all zeros — so a stage 2
 run can warm-start from a stage 1 checkpoint. They also share the `g1_jump` experiment directory,
