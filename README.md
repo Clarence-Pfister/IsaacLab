@@ -315,10 +315,13 @@ from a goal that moved:
 ./isaaclab.sh play \
   --rl_library rsl_rl \
   --task Isaac-Velocity-Jump-G1-Stage2-Play-v0 \
-  --load_run RUN_DIRECTORY \
-  --checkpoint model_ITERATION.pt \
+  --checkpoint logs/rsl_rl/g1_jump/RUN_DIRECTORY/model_ITERATION.pt \
   --viz kit
 ```
+
+Note that `play` and `train` read `--checkpoint` differently. `train` takes a file *name* resolved
+inside `--load_run`; `play` takes a *path* and ignores `--load_run` entirely when `--checkpoint` is
+given. Passing the train form to `play` fails with `FileNotFoundError`.
 
 The marker shows the goal in world frame, so its heading is the robot's starting yaw plus the
 commanded turn — a triad past ±30° is expected, not a bug. `--viz kit` needs a display and so does not
