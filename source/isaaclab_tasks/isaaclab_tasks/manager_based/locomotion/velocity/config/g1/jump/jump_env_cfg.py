@@ -486,6 +486,49 @@ class G1JumpStage2WideEnvCfg(G1JumpStage2EnvCfg):
 
 
 @configclass
+class G1JumpStage2WideLandEnvCfg(G1JumpStage2WideEnvCfg):
+    """Wide stage 2, rewarded for arriving at touchdown rather than after settling.
+
+    Measured over 601 episodes of the wide policy, the mean reach ratio along the goal
+    direction is 0.948 with a median of 0.999, and undershoot and overshoot are balanced
+    (32% against 34%). There is no bias towards the start pose. The shortfall is entirely a
+    function of distance: goals under 0.45 m reach 1.007 at 0.078 m error, while goals past
+    0.75 m reach 0.907 at 0.149 m. The two overrides below address the two causes of that.
+
+    Kept as its own task so the wide stage stays reproducible.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Inherited weights put 12 on standing against 8 on landing, so the policy scores
+        # better arriving after it has settled than at touchdown, and a short landing followed
+        # by a corrective hop is worth more than a landing on the mark. Swap the emphasis:
+        # landing is now the phase the position error is judged in.
+        self.rewards.target_position.params["phase_weights"] = (0.0, 1.0, 2.0, 4.0, 14.0, 8.0)
+
+        # The reference is a single fixed jump, so its pelvis arc only describes the distance
+        # it was recorded at. Holding the robot to that arc through flight is what caps range,
+        # which is why the shortfall appears only on far goals. Crouch and take-off keep their
+        # weights, so leaving the ground is still required; flight and landing are relaxed so
+        # the arc can stretch. This reduces the term rather than removing it: with foot height
+        # it is the inductive bias that keeps the behaviour a jump instead of a walk
+        # (Li et al., section IV-D, remark 2), and the paper keeps it through every stage.
+        self.rewards.track_root_pos_z.params["phase_weights"] = (4.0, 8.0, 12.0, 8.0, 6.0, 6.0)
+
+
+@configclass
+class G1JumpStage2WideLandEnvCfg_PLAY(G1JumpStage2WideLandEnvCfg):
+    actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.observations.policy.enable_corruption = True
+        self.commands.jump_goal.debug_vis = True
+
+
+@configclass
 class G1JumpStage2WideEnvCfg_PLAY(G1JumpStage2WideEnvCfg):
     actions: G1JumpPlayActionsCfg = G1JumpPlayActionsCfg()
 
