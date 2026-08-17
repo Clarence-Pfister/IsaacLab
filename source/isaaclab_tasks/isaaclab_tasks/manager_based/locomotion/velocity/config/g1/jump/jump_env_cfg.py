@@ -489,11 +489,10 @@ class G1JumpStage2WideEnvCfg(G1JumpStage2EnvCfg):
 class G1JumpStage2WideLandEnvCfg(G1JumpStage2WideEnvCfg):
     """Wide stage 2, rewarded for arriving at touchdown rather than after settling.
 
-    Measured over 601 episodes of the wide policy, the mean reach ratio along the goal
-    direction is 0.948 with a median of 0.999, and undershoot and overshoot are balanced
-    (32% against 34%). There is no bias towards the start pose. The shortfall is entirely a
-    function of distance: goals under 0.45 m reach 1.007 at 0.078 m error, while goals past
-    0.75 m reach 0.907 at 0.149 m. The two overrides below address the two causes of that.
+    The wide policy lands short and walks the rest in. Measured over 600 episodes with
+    observation corruption off, it covers 0.874 of the goal distance by touchdown but 0.986
+    of it once settled, and the shortfall grows with distance: goals past 0.75 m reach only
+    0.851 at touchdown against 0.891 for goals under 0.45 m.
 
     Kept as its own task so the wide stage stays reproducible.
     """
@@ -503,9 +502,20 @@ class G1JumpStage2WideLandEnvCfg(G1JumpStage2WideEnvCfg):
 
         # Inherited weights put 12 on standing against 8 on landing, so the policy scores
         # better arriving after it has settled than at touchdown, and a short landing followed
-        # by a corrective hop is worth more than a landing on the mark. Swap the emphasis:
-        # landing is now the phase the position error is judged in.
-        self.rewards.target_position.params["phase_weights"] = (0.0, 1.0, 2.0, 4.0, 14.0, 8.0)
+        # by a corrective hop is worth more than a landing on the mark. Weight landing above
+        # standing so the position error is judged where we want it to be small.
+        #
+        # A first pass used 14 against 8, which overcorrected: median reach at touchdown rose
+        # from 0.959 to 0.997 and far goals improved from 0.851 to 0.873, but the robot began
+        # arriving with momentum it could not shed, and settled overshoot went from 32% of
+        # episodes to 48% while settled error rose from 0.071 m to 0.077 m. 12 against 10 keeps
+        # landing dominant with less of a push past the goal.
+        self.rewards.target_position.params["phase_weights"] = (0.0, 1.0, 2.0, 4.0, 12.0, 10.0)
+
+        # Landing carried a weight of 1, so nothing asked the robot to be stopped at touchdown
+        # and the position term alone drove it long. Weight arriving at rest, which is what
+        # bounds the overshoot the position change above introduces.
+        self.rewards.target_velocity.params["phase_weights"] = (0.0, 0.0, 3.0, 3.0, 6.0, 2.0)
 
         # The reference is a single fixed jump, so its pelvis arc only describes the distance
         # it was recorded at. Holding the robot to that arc through flight is what caps range,
