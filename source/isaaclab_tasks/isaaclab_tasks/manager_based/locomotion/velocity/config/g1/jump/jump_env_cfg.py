@@ -41,6 +41,7 @@ from .mdp import (
     ground_contact,
     obs_future_reference_preview,
     obs_goal_command,
+    obs_goal_remaining,
     obs_jump_phase,
     penalize_ground_impact,
     penalize_joint_acc,
@@ -143,20 +144,25 @@ class G1JumpObservationsCfg:
             func=mdp.joint_vel_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES)},
         )
-        root_pos = ObsTerm(
-            func=mdp.root_pos_w,
+        # Every root term below is in the body frame, because the policy has to run on a robot
+        # that has no world frame to report in. The environment-frame position, world-frame
+        # velocities and absolute yaw these replace are all ground truth the G1 cannot measure:
+        # its base-velocity estimate is contact-based and blind through flight, and IMU yaw
+        # drifts with no absolute reference. Training on them produces a policy whose
+        # observation vector cannot be assembled on hardware at any level of robustness.
+        goal_remaining = ObsTerm(
+            func=obs_goal_remaining,
+        )
+        base_lin_vel = ObsTerm(
+            func=mdp.base_lin_vel,
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
-        root_vel = ObsTerm(
-            func=mdp.root_lin_vel_w,
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity,
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
-        root_quat_w = ObsTerm(
-            func=mdp.root_quat_w,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        )
-        root_ang_vel = ObsTerm(
-            func=mdp.root_ang_vel_w,
+        base_ang_vel = ObsTerm(
+            func=mdp.base_ang_vel,
             params={"asset_cfg": SceneEntityCfg("robot")},
         )
         last_action = ObsTerm(
