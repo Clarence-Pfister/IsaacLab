@@ -16,6 +16,7 @@ import torch
 
 import isaaclab.utils.string as string_utils
 from isaaclab.envs.mdp.actions import JointPositionAction
+from isaaclab.utils.buffers import DelayBuffer
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -28,8 +29,17 @@ class LowPassJointPositionAction(JointPositionAction):
 
     cfg: LowPassJointPositionActionCfg
 
-    def __init__(self, cfg: LowPassJointPositionActionCfg, env: ManagerBasedEnv):
+    def __init__(self, cfg: LowPassJointPositionActionCfg, env: ManagerBasedEnv) -> None:
         super().__init__(cfg, env)
+
+        if cfg.min_delay_steps < 0:
+            raise ValueError(f"Minimum action delay must be non-negative. Got {cfg.min_delay_steps}.")
+        if cfg.min_delay_steps > cfg.max_delay_steps:
+            raise ValueError(
+                "Minimum action delay must not exceed maximum action delay. "
+                f"Got {cfg.min_delay_steps} and {cfg.max_delay_steps}."
+            )
+        self._action_delay_buffer = DelayBuffer(cfg.max_delay_steps, self.num_envs, device=self.device)
 
         self._alpha = torch.ones((1, self.action_dim), device=self.device)
         if isinstance(cfg.alpha, (float, int)):
@@ -49,8 +59,9 @@ class LowPassJointPositionAction(JointPositionAction):
 
         self._previous_targets = torch.zeros_like(self.processed_actions)
 
-    def process_actions(self, actions: torch.Tensor):
-        super().process_actions(actions)
+    def process_actions(self, actions: torch.Tensor) -> None:
+        delayed_actions = self._action_delay_buffer.compute(actions)
+        super().process_actions(delayed_actions)
         self._processed_actions[:] = (
             self._alpha * self._processed_actions + (1.0 - self._alpha) * self._previous_targets
         )
@@ -60,4 +71,19 @@ class LowPassJointPositionAction(JointPositionAction):
         if env_ids is None:
             env_ids = slice(None)
         super().reset(env_ids)
+
+        if self.cfg.min_delay_steps == self.cfg.max_delay_steps:
+            time_lags = self.cfg.min_delay_steps
+        else:
+            num_envs = self.num_envs if isinstance(env_ids, slice) else len(env_ids)
+            time_lags = torch.randint(
+                low=self.cfg.min_delay_steps,
+                high=self.cfg.max_delay_steps + 1,
+                size=(num_envs,),
+                dtype=torch.int,
+                device=self.device,
+            )
+        self._action_delay_buffer.set_time_lag(time_lags, env_ids)
+        self._action_delay_buffer.reset(env_ids)
+
         self._previous_targets[env_ids] = self._asset.data.joint_pos.torch[env_ids][:, self._joint_ids]

@@ -24,10 +24,13 @@
 # would fail to load into the 164 of the current task, and keeping them apart also stops the
 # newest-run checkpoint search from reaching across into the wrong lineage. Override with
 # --experiment.
+#
+# The actor is 326 wide as of the asymmetric actor/critic split, so g1_jump_deploy from the
+# previous 164-wide attempt is also incompatible and this writes to its own directory again.
 
 set -euo pipefail
 
-EXPERIMENT="g1_jump_deploy"
+EXPERIMENT="g1_jump_deploy2"
 
 # stage name | task id | iterations
 STAGES=(
@@ -35,6 +38,7 @@ STAGES=(
     "stage2|Isaac-Velocity-Jump-G1-Stage2-v0|6000"
     "stage2wide|Isaac-Velocity-Jump-G1-Stage2-Wide-v0|5000"
     "wideland|Isaac-Velocity-Jump-G1-Stage2-Wide-Land-v0|4000"
+    "stage3|Isaac-Velocity-Jump-G1-Stage3-v0|5000"
 )
 
 FROM=""

@@ -81,6 +81,90 @@ def obs_goal_remaining(env) -> torch.Tensor:
     return quat_apply_inverse(yaw_quat(root_quat_w), goal_w - root_pos_w)
 
 
+def obs_goal_remaining_stale(env, freeze_prob: float = 1.0, drift_std: float = 0.0) -> torch.Tensor:
+    """Return the goal displacement with contact-odometry staleness during flight [m].
+
+    Outside the ``FLIGHT`` phase, this is identical to :func:`obs_goal_remaining`. On
+    entering ``FLIGHT``, each environment independently freezes the last pre-flight
+    value with probability :paramref:`freeze_prob`. Frozen values optionally accumulate
+    zero-mean Gaussian drift once per environment step.
+
+    State is allocated lazily on the environment. A decrease in an environment's episode
+    step identifies a reset and clears its held value, phase, and freeze decision before
+    processing the new episode.
+
+    Args:
+        env: The environment from which to compute the observation.
+        freeze_prob: Probability that an environment freezes throughout a flight phase.
+        drift_std: Standard deviation [m] of Gaussian drift added per frozen step.
+
+    Returns:
+        Goal displacement in the current yaw-only heading frame [m].
+
+    Raises:
+        ValueError: If :paramref:`freeze_prob` is outside ``[0, 1]`` or
+            :paramref:`drift_std` is negative.
+    """
+    if not 0.0 <= freeze_prob <= 1.0:
+        raise ValueError(f"freeze_prob must be in [0, 1], got {freeze_prob}.")
+    if drift_std < 0.0:
+        raise ValueError(f"drift_std must be non-negative, got {drift_std}.")
+
+    live_value = obs_goal_remaining(env)
+    phase = get_jump_phase(env)
+    episode_step = env.episode_length_buf
+    flight_phase = list(JUMP_PHASES).index("FLIGHT")
+    state_name = "_obs_goal_remaining_stale_state"
+
+    if not hasattr(env, state_name):
+        setattr(
+            env,
+            state_name,
+            {
+                "held_value": live_value.clone(),
+                "previous_phase": torch.full_like(phase, -1),
+                "freeze": torch.zeros(env.num_envs, dtype=torch.bool, device=env.device),
+                "last_step": torch.full_like(episode_step, -1),
+            },
+        )
+    state = getattr(env, state_name)
+
+    # A decreasing step counter identifies a reset, except when an episode ends on its very
+    # first step: the counter then reads zero both before and after, and the comparison alone
+    # would carry the previous episode's held value across. Treating step zero as a reset
+    # closes that hole and is harmless when repeated, because the held value is only ever
+    # seeded from the live one here.
+    reset = (episode_step < state["last_step"]) | (episode_step == 0)
+    state["held_value"][reset] = live_value[reset]
+    state["previous_phase"][reset] = -1
+    state["freeze"][reset] = False
+
+    in_flight = phase == flight_phase
+    entered_flight = in_flight & (state["previous_phase"] != flight_phase)
+    # Drawn only when some environment is actually entering flight. Sampling unconditionally
+    # would advance the generator on every call, so a second call for another observation
+    # group would change the freeze decisions of later episodes under a fixed seed.
+    if entered_flight.any():
+        freeze_sample = torch.rand(env.num_envs, device=env.device) < freeze_prob
+        state["freeze"][entered_flight] = freeze_sample[entered_flight]
+
+    not_in_flight = ~in_flight
+    state["held_value"][not_in_flight] = live_value[not_in_flight]
+
+    frozen = in_flight & state["freeze"]
+    new_step = episode_step != state["last_step"]
+    add_drift = frozen & new_step
+    if drift_std > 0.0 and add_drift.any():
+        drift = torch.randn_like(state["held_value"]) * drift_std
+        state["held_value"][add_drift] += drift[add_drift]
+
+    result = live_value.clone()
+    result[frozen] = state["held_value"][frozen]
+    state["previous_phase"].copy_(phase)
+    state["last_step"].copy_(episode_step)
+    return result
+
+
 def obs_jump_phase(env) -> torch.Tensor:
     """Returns the current jump phase as a one-hot policy observation."""
     phase = get_jump_phase(env)
