@@ -23,6 +23,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils.configclass import configclass
+from isaaclab.utils.noise import UniformNoiseCfg
 
 from .constants import (
     CONTACT_SENSOR_NAMES,
@@ -42,6 +43,7 @@ from .mdp import (
     obs_future_reference_preview,
     obs_goal_command,
     obs_goal_remaining,
+    obs_goal_remaining_stale,
     obs_jump_phase,
     penalize_ground_impact,
     penalize_joint_acc,
@@ -133,37 +135,68 @@ class G1JumpPlayActionsCfg:
 
 
 @configclass
+class G1JumpDeployActionsCfg:
+    """Action pipeline used for the sim-to-real stage and intended for the robot.
+
+    Training and deployment have to drive the same pipeline, or the policy is tuned against
+    an actuation path it will never see. Stage 3 therefore trains through the same low-pass
+    filter and command delay that the deployed controller runs, rather than the unfiltered,
+    zero-latency path the earlier stages use. This is deliberately separate from
+    :class:`G1JumpPlayActionsCfg`, whose filter exists to make playback legible: retuning a
+    visualization setting must not silently change what Stage 3 trains against.
+    """
+
+    joint_pos = LowPassJointPositionActionCfg(
+        asset_name="robot",
+        joint_names=JOINT_NAMES,
+        scale=JOINT_ACTION_SCALES,
+        use_default_offset=True,
+        alpha=PLAY_JOINT_ACTION_FILTER_ALPHA,
+    )
+
+
+@configclass
 class G1JumpObservationsCfg:
     @configclass
     class PolicyCfg(ObsGroup):
         joint_pos = ObsTerm(
             func=mdp.joint_pos_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES)},
+            history_length=4,
         )
         joint_vel = ObsTerm(
             func=mdp.joint_vel_rel,
             params={"asset_cfg": SceneEntityCfg("robot", joint_names=JOINT_NAMES)},
+            history_length=4,
         )
-        # Every root term below is in the body frame, because the policy has to run on a robot
-        # that has no world frame to report in. The environment-frame position, world-frame
-        # velocities and absolute yaw these replace are all ground truth the G1 cannot measure:
-        # its base-velocity estimate is contact-based and blind through flight, and IMU yaw
-        # drifts with no absolute reference. Training on them produces a policy whose
-        # observation vector cannot be assembled on hardware at any level of robustness.
+        # Every term in this group has to be assemblable on a real G1, which rules out both a
+        # world frame and base linear velocity. The environment-frame position, world-frame
+        # velocities and absolute yaw that the root terms replace are ground truth the robot
+        # cannot measure: IMU yaw drifts with no absolute reference, and the only base-velocity
+        # source is a contact-based leg-odometry estimate that stops updating the moment both
+        # feet leave the ground. This task spends roughly a third of a second airborne, so that
+        # estimate is unavailable exactly when the landing is being committed. Unitree's own
+        # deployment stack, NVIDIA's ProtoMotions and LeCAR-Lab's ASAP all reach the same
+        # conclusion and keep base linear velocity out of the deployed actor, so it lives in the
+        # critic group below, where being sim-only costs nothing.
+        #
+        # The history on the terms that carry it is what pays for that removal: differencing
+        # goal_remaining across four steps recovers velocity relative to the goal, which is the
+        # quantity base linear velocity was really supplying. Noise is applied per step before
+        # it enters the history buffer, so a corrupted history stays a realistic one.
         goal_remaining = ObsTerm(
             func=obs_goal_remaining,
-        )
-        base_lin_vel = ObsTerm(
-            func=mdp.base_lin_vel,
-            params={"asset_cfg": SceneEntityCfg("robot")},
-        )
-        projected_gravity = ObsTerm(
-            func=mdp.projected_gravity,
-            params={"asset_cfg": SceneEntityCfg("robot")},
+            history_length=4,
         )
         base_ang_vel = ObsTerm(
             func=mdp.base_ang_vel,
             params={"asset_cfg": SceneEntityCfg("robot")},
+            history_length=4,
+        )
+        projected_gravity = ObsTerm(
+            func=mdp.projected_gravity,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+            history_length=4,
         )
         last_action = ObsTerm(
             func=mdp.last_action,
@@ -184,6 +217,15 @@ class G1JumpObservationsCfg:
             self.concatenate_terms = True
 
     policy: PolicyCfg = PolicyCfg()
+
+    @configclass
+    class CriticCfg(PolicyCfg):
+        base_lin_vel = ObsTerm(
+            func=mdp.base_lin_vel,
+            params={"asset_cfg": SceneEntityCfg("robot")},
+        )
+
+    critic: CriticCfg = CriticCfg()
 
 
 @configclass
@@ -531,6 +573,105 @@ class G1JumpStage2WideLandEnvCfg(G1JumpStage2WideEnvCfg):
         # it is the inductive bias that keeps the behaviour a jump instead of a walk
         # (Li et al., section IV-D, remark 2), and the paper keeps it through every stage.
         self.rewards.track_root_pos_z.params["phase_weights"] = (4.0, 8.0, 12.0, 8.0, 6.0, 6.0)
+
+
+@configclass
+class G1JumpStage3EnvCfg(G1JumpStage2WideLandEnvCfg):
+    """Sim-to-real stage with randomized dynamics, sensing, and action latency.
+
+    The actor is already restricted to observations available on the physical G1, while the
+    simulation-only critic retains privileged, uncorrupted observations.
+    """
+
+    @configclass
+    class EventCfg(G1JumpEventCfg):
+        # These contact ranges cover low-grip surfaces through high-grip rubber contact and
+        # allow imperfectly inelastic contacts without introducing highly elastic impacts.
+        physics_material = EventTerm(
+            func=mdp.randomize_rigid_body_material,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "static_friction_range": (0.5, 1.25),
+                "dynamic_friction_range": (0.4, 1.0),
+                "restitution_range": (0.0, 0.5),
+                "num_buckets": 64,
+            },
+        )
+        # Scaling every link by ±20% covers aggregate mass and link-level model error.
+        robot_mass = EventTerm(
+            func=mdp.randomize_rigid_body_mass,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names=".*"),
+                "mass_distribution_params": (0.8, 1.2),
+                "operation": "scale",
+            },
+        )
+        # A 5 cm pelvis offset covers uncertainty in torso equipment and payload placement.
+        pelvis_com = EventTerm(
+            func=mdp.randomize_rigid_body_com,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", body_names="pelvis"),
+                "com_range": {
+                    "x": (-0.05, 0.05),
+                    "y": (-0.05, 0.05),
+                    "z": (-0.05, 0.05),
+                },
+            },
+        )
+        # ±25% gain scaling covers actuator calibration and unmodelled drivetrain response.
+        actuator_gains = EventTerm(
+            func=mdp.randomize_actuator_gains,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=".*"),
+                "stiffness_distribution_params": (0.75, 1.25),
+                "damping_distribution_params": (0.75, 1.25),
+                "operation": "scale",
+            },
+        )
+        # Frequent 0.5 m/s lateral velocity changes exercise recovery during every jump.
+        push_robot = EventTerm(
+            func=mdp.push_by_setting_velocity,
+            mode="interval",
+            interval_range_s=(1.5, 3.0),
+            params={"velocity_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5)}},
+        )
+
+    actions: G1JumpDeployActionsCfg = G1JumpDeployActionsCfg()
+    events: EventCfg = EventCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # Zero to two control steps represents 0-40 ms latency at the 50 Hz policy rate.
+        self.actions.joint_pos.min_delay_steps = 0
+        self.actions.joint_pos.max_delay_steps = 2
+
+        self.observations.policy.enable_corruption = True
+        self.observations.policy.joint_pos.noise = UniformNoiseCfg(n_min=-0.01, n_max=0.01, operation="add")
+        self.observations.policy.joint_vel.noise = UniformNoiseCfg(n_min=-1.0, n_max=1.0, operation="add")
+        self.observations.policy.base_ang_vel.noise = UniformNoiseCfg(n_min=-0.3, n_max=0.3, operation="add")
+        self.observations.policy.projected_gravity.noise = UniformNoiseCfg(n_min=-0.1, n_max=0.1, operation="add")
+        self.observations.policy.goal_remaining.func = obs_goal_remaining_stale
+        self.observations.policy.goal_remaining.params = {"freeze_prob": 0.8, "drift_std": 0.005}
+        self.observations.policy.goal_remaining.noise = UniformNoiseCfg(n_min=-0.02, n_max=0.02, operation="add")
+
+        # The critic is simulation-only and must not inherit actor corruption or stale odometry.
+        self.observations.critic.enable_corruption = False
+        self.observations.critic.goal_remaining.func = obs_goal_remaining
+        self.observations.critic.goal_remaining.params = {}
+
+
+@configclass
+class G1JumpStage3EnvCfg_PLAY(G1JumpStage3EnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.observations.policy.enable_corruption = True
+        self.commands.jump_goal.debug_vis = True
 
 
 @configclass

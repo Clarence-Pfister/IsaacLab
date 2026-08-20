@@ -27,6 +27,7 @@ from .observations import (
     obs_future_reference_preview,
     obs_goal_command,
     obs_goal_remaining,
+    obs_goal_remaining_stale,
     obs_jump_phase,
 )
 from .rewards import (

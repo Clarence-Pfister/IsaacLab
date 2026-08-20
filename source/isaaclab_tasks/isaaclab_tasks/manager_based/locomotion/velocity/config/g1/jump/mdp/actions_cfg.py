@@ -26,3 +26,15 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
     class_type: type | str = "{DIR}.actions:LowPassJointPositionAction"
     alpha: float | dict[str, float] = 1.0
     """New-target weight; lower values apply stronger low-pass filtering."""
+
+    min_delay_steps: int = 0
+    """Minimum action delay in policy control steps, sampled per environment on reset.
+
+    One policy control step is 0.02 s at the 50 Hz policy rate.
+    """
+
+    max_delay_steps: int = 0
+    """Maximum action delay in policy control steps, sampled per environment on reset.
+
+    One policy control step is 0.02 s at the 50 Hz policy rate.
+    """
