@@ -69,6 +69,10 @@ class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
         self.experiment_name = "g1_jump"
         self.max_iterations = 100000
         self.save_interval = 500
+        # The critic reads its own observation group, which carries the base linear
+        # velocity the actor is denied because the robot cannot measure it. Without this
+        # the critic falls back to the actor group and the asymmetry silently does nothing.
+        self.obs_groups = {"actor": ["policy"], "critic": ["critic"]}
 
         self.actor.hidden_dims = [1024, 1024, 1024, 1024, 1024, 1024]
         self.critic.hidden_dims = [1024, 1024, 1024, 1024]
