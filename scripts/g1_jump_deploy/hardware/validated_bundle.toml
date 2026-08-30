@@ -1,0 +1,33 @@
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+# All rights reserved.
+#
+# SPDX-License-Identifier: BSD-3-Clause
+
+schema_version = "1.0"
+accepted_at = "2026-08-27T01:45:21Z"
+bundle = "logs/g1_jump_deploy_bundle_validated"
+task = "Isaac-Velocity-Jump-G1-Stage3-v0"
+
+[artifacts."deploy_manifest.json"]
+sha256 = "ed83f70ed668e9c4a28381115a381489f5a4608c25d054019e83084897df5cb1"
+
+[artifacts."policy.onnx"]
+sha256 = "e34d9b763fce6df5afd08f8e53c0d32b692e906aea0308f90e232822f05477a2"
+
+[artifacts."policy.pt"]
+sha256 = "42f91f86b424289d9b8c487e1c941da5d6098e4e24fcb5338c870c04505f899a"
+
+[artifacts."reference_preview_152x70.npy"]
+sha256 = "999cc61763ee37e1b96280d95f52e46997a2c509769a5aa9f16951aab3e4b355"
+
+[artifacts."jump_phase_152x6.npy"]
+sha256 = "14d4837e275f42fc47118dba2fc674230836f3de2c19fff8d4f1ed109417c988"
+
+[validation]
+isaac_endpoint_planar_error_m = [0.0119, 0.0167, 0.0219]
+mujoco_command_displacement_correlation = 0.9510525
+mujoco_grid_cases = 9
+mujoco_grid_within_0_1_m = 8
+mujoco_contact_robustness_cases = 15
+mujoco_contact_safe_cases = 15
+maximum_effort_limit_ratio = 0.6

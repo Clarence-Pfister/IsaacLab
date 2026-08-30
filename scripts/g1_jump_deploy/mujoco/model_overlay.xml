@@ -1,0 +1,37 @@
+<!--
+Copyright (c) 2022-2026, The Isaac Lab Project Developers
+(https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
+All rights reserved.
+
+SPDX-License-Identifier: BSD-3-Clause
+-->
+<mujoco model="g1_jump_sim2sim_overlay">
+    <!--
+    implicitfast is stable for the stiff, explicitly evaluated PD loop without
+    dropping velocity-dependent forces. Newton solves the coupled contact and
+    joint constraints robustly. An elliptic cone is the closest available
+    physical analogue to PhysX Coulomb friction, although PhysX's friction
+    patches and TGS solver have no exact MuJoCo equivalent.
+    -->
+    <option timestep="0.002" gravity="0 0 -9.81" integrator="implicitfast"
+            solver="Newton" cone="elliptic" iterations="100" tolerance="1e-8" />
+
+    <worldbody>
+        <!-- priority forces these material parameters to win contact mixing. -->
+        <geom name="sim2sim_ground" type="plane" pos="0 0 0" size="0 0 0.05"
+              contype="2" conaffinity="1" condim="6" priority="1"
+              friction="1.0 0.005 0.0001" rgba="0.25 0.28 0.32 1" />
+    </worldbody>
+
+    <!--
+    The compositor applies these collision bits to every collidable geom in the
+    source robot. Robot/robot pairs then fail MuJoCo's bitmask test, while each
+    robot/ground pair passes it. Keeping this policy in the overlay makes the
+    runtime mutation explicit and keeps the checked-in source MJCF untouched.
+    -->
+    <custom>
+        <text name="sim2sim_collision_mode" data="robot_ground_only" />
+        <numeric name="sim2sim_robot_contype" data="1" />
+        <numeric name="sim2sim_robot_conaffinity" data="2" />
+    </custom>
+</mujoco>
