@@ -133,6 +133,10 @@ class _OnnxPolicyExporter(torch.nn.Module):
             self.actor = copy.deepcopy(policy.student)
             if self.is_recurrent:
                 self.rnn = copy.deepcopy(policy.memory_s.rnn)
+        elif not self.is_recurrent and hasattr(policy, "as_onnx"):
+            # RSL-RL 4.0 and newer exposes the deployment actor through its model
+            # export adapter instead of an ``actor`` or ``student`` attribute.
+            self.actor = policy.as_onnx(verbose)
         else:
             raise ValueError("Policy does not have an actor/student module.")
         # set up recurrent network
@@ -186,6 +190,7 @@ class _OnnxPolicyExporter(torch.nn.Module):
                     input_names=["obs", "h_in", "c_in"],
                     output_names=["actions", "h_out", "c_out"],
                     dynamic_axes={},
+                    dynamo=False,
                 )
             elif self.rnn_type == "gru":
                 torch.onnx.export(
@@ -198,11 +203,13 @@ class _OnnxPolicyExporter(torch.nn.Module):
                     input_names=["obs", "h_in"],
                     output_names=["actions", "h_out"],
                     dynamic_axes={},
+                    dynamo=False,
                 )
             else:
                 raise NotImplementedError(f"Unsupported RNN type: {self.rnn_type}")
         else:
-            obs = torch.zeros(1, self.actor[0].in_features)
+            input_size = self.actor.input_size if hasattr(self.actor, "input_size") else self.actor[0].in_features
+            obs = torch.zeros(1, input_size)
             torch.onnx.export(
                 self,
                 obs,
@@ -213,4 +220,5 @@ class _OnnxPolicyExporter(torch.nn.Module):
                 input_names=["obs"],
                 output_names=["actions"],
                 dynamic_axes={},
+                dynamo=False,
             )
