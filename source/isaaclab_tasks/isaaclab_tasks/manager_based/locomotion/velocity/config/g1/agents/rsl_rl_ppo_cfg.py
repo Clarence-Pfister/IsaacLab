@@ -11,6 +11,17 @@ from isaaclab_tasks.utils import preset
 
 
 @configclass
+class G1JumpRetriggerResidualModelCfg(RslRlMLPModelCfg):
+    """Actor configuration with a repeat-only residual branch."""
+
+    class_name: str = (
+        "isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.retrigger_residual:RetriggerResidualMLPModel"
+    )
+    retrigger_observation_index: int = 245
+    residual_hidden_dims: list[int] = [512, 512]
+
+
+@configclass
 class G1RoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     obs_groups = {"actor": ["policy"], "critic": ["policy"]}
@@ -68,7 +79,10 @@ class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
 
         self.experiment_name = "g1_jump"
         self.max_iterations = 100000
-        self.save_interval = 500
+        # Deployment acceptance can regress while aggregate reward continues to rise. Keep
+        # enough intermediate candidates to select on deterministic accuracy and saturation
+        # without retaining a full 109 MB checkpoint after every policy update.
+        self.save_interval = 100
         # The critic reads its own observation group, which carries the base linear
         # velocity the actor is denied because the robot cannot measure it. Without this
         # the critic falls back to the actor group and the asymmetry silently does nothing.
@@ -76,14 +90,50 @@ class G1JumpPPORunnerCfg(G1RoughPPORunnerCfg):
 
         self.actor.hidden_dims = [1024, 1024, 1024, 1024, 1024, 1024]
         self.critic.hidden_dims = [1024, 1024, 1024, 1024]
+        # A hard environment-side clip allowed the previous actor mean to drift as far as
+        # +/-59: every value past the clip produced the same target and therefore the same
+        # reward. The smooth transformed distribution keeps both training samples and the
+        # exported deterministic actor inside the normalized action range by construction.
+        self.actor.distribution_cfg.class_name = (
+            "isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.distributions:TanhGaussianDistribution"
+        )
+        self.actor.distribution_cfg.init_std = 0.5
         self.num_steps_per_env = 32
         self.algorithm.learning_rate = 5e-5
         self.algorithm.num_mini_batches = 4
-        # Down from the 0.008 inherited from the rough-terrain config. The loss is
-        # surrogate + value - entropy_coef * entropy, so once the task gradient is spent the
-        # entropy bonus is the only term left that can still improve the objective, and PPO
-        # collects it by widening the action distribution. Late in the wide stage 2 run that
-        # cost 5% of the return: mean_std rose 1.63 -> 2.15 while every velocity-sensitive
-        # term fell (joint velocity tracking -51%, angular rate -41%) and every position term
-        # held flat, which is jitter rather than a policy that forgot the task.
-        self.algorithm.entropy_coef = 0.002
+        # The transformed distribution has no analytic entropy, and the earlier entropy
+        # bonus actively drove actions into saturation after the task reward converged.
+        # Exploration still comes from the learned latent standard deviation.
+        self.algorithm.entropy_coef = 0.0
+
+
+@configclass
+class G1JumpFineTunePPORunnerCfg(G1JumpPPORunnerCfg):
+    """Conservative optimizer settings for deployment-policy curriculum transitions."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        # A changed observation or reward contract can move the deterministic policy long
+        # before aggregate stochastic reward reveals the regression. Keep these transitions
+        # fixed and slow; acceptance is selected from deterministic checkpoint evaluations.
+        self.save_interval = 25
+        self.algorithm.learning_rate = 1.0e-5
+        self.algorithm.schedule = "fixed"
+
+
+@configclass
+class G1JumpRetriggerResidualPPORunnerCfg(G1JumpFineTunePPORunnerCfg):
+    """Fine-tune a gated residual while retaining the complete base actor."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        base_actor = self.actor
+        self.actor = G1JumpRetriggerResidualModelCfg(
+            hidden_dims=list(base_actor.hidden_dims),
+            activation=base_actor.activation,
+            obs_normalization=base_actor.obs_normalization,
+            distribution_cfg=base_actor.distribution_cfg,
+        )
+        self.algorithm.learning_rate = 5.0e-5

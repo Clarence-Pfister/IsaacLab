@@ -38,3 +38,21 @@ class LowPassJointPositionActionCfg(JointPositionActionCfg):
 
     One policy control step is 0.02 s at the 50 Hz policy rate.
     """
+
+    effort_limit_ratio: float | dict[str, float] | None = None
+    """Available fraction of actuator effort used to project position targets.
+
+    When configured, the action term recomputes the nearest admissible target at each
+    physics step so its instantaneous implicit-PD demand remains inside the envelope.
+    A dictionary maps joint-name expressions to ratios; unmatched joints use ``1.0``.
+    ``None`` disables projection.
+    """
+
+    lower_limit_velocity_lookahead: dict[str, float] | None = None
+    """Lower-limit braking lookahead by joint-name expression [s].
+
+    At every physics step, a configured joint target is raised to at least
+    ``clip_lower + lookahead * max(-joint_velocity, 0)``. This provides an
+    explicit stopping margin before a rapidly extending joint reaches its lower
+    command bound. ``None`` disables the projection.
+    """

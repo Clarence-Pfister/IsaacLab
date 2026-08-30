@@ -26,16 +26,36 @@ from ..constants import (
 )
 
 
+def get_reference_initial_pose() -> tuple[
+    dict[str, float], tuple[float, float, float], tuple[float, float, float, float]
+]:
+    """Read the joint and root pose at reference frame zero.
+
+    Returns:
+        Joint positions [rad] keyed by joint name, root position [m] in XYZ order,
+        and the normalized world-from-root quaternion in XYZW order.
+    """
+    frame0 = pd.read_csv(CSV_MOTION_PATH, nrows=1).iloc[0]
+    joint_pos = {joint_name: float(frame0[joint_name]) for joint_name in JOINT_NAMES}
+    root_pos = tuple(float(frame0[name]) for name in ("root_translateX", "root_translateY", "root_translateZ"))
+    root_quat_wxyz = tuple(
+        float(frame0[name]) for name in ("root_quaternionW", "root_quaternionX", "root_quaternionY", "root_quaternionZ")
+    )
+    quaternion_norm = sum(value * value for value in root_quat_wxyz) ** 0.5
+    if quaternion_norm <= 0.0:
+        raise ValueError("Reference frame-zero root quaternion has zero norm.")
+    root_quat_xyzw = tuple(root_quat_wxyz[index] / quaternion_norm for index in (1, 2, 3, 0))
+    return joint_pos, root_pos, root_quat_xyzw
+
+
 def get_reference_initial_state() -> tuple[dict[str, float], float]:
-    """Reads frame 0 of the reference motion for robot initialization.
+    """Read frame zero joint positions and root height for robot initialization.
 
     Returns:
         The joint positions [rad] keyed by joint name and the root height [m].
     """
-    frame0 = pd.read_csv(CSV_MOTION_PATH, nrows=1).iloc[0]
-    joint_pos = {joint_name: float(frame0[joint_name]) for joint_name in JOINT_NAMES}
-    root_z = float(frame0["root_translateZ"])
-    return joint_pos, root_z
+    joint_pos, root_pos, _ = get_reference_initial_pose()
+    return joint_pos, root_pos[2]
 
 
 def slerp_quat(
@@ -232,7 +252,10 @@ def get_phase_id(phase_name: str) -> int:
 def get_env_time(env) -> torch.Tensor:
     if not hasattr(env, "start_times"):
         env.start_times = torch.zeros(env.num_envs, device=env.device)
-    return env.start_times + env.episode_length_buf * env.step_dt
+    # A negative start time intentionally holds the deployment reference at frame zero
+    # while a repeated-jump handoff fills observation and action history. Reference
+    # lookups, phase labels, and the exported table all use frame zero during this hold.
+    return torch.clamp_min(env.start_times + env.episode_length_buf * env.step_dt, 0.0)
 
 
 def warp_to_torch(warp_array):

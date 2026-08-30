@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -30,6 +31,112 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def _sample_planar_displacement(
+    sample_count: int,
+    pos_x_range: tuple[float, float],
+    pos_y_range: tuple[float, float],
+    zero_goal_probability: float,
+    boundary_goal_probability: float,
+    device: str | torch.device,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Sample a mixture of uniform, zero, and boundary planar goals.
+
+    Args:
+        sample_count: Number of displacement samples.
+        pos_x_range: Minimum and maximum forward displacement [m].
+        pos_y_range: Minimum and maximum lateral displacement [m].
+        zero_goal_probability: Probability of sampling exactly zero displacement.
+        boundary_goal_probability: Probability of sampling each coordinate at one of
+            its configured range boundaries.
+        device: Torch device on which to create the samples.
+
+    Returns:
+        Forward and lateral displacement samples [m], each with shape ``(sample_count,)``.
+
+    Raises:
+        ValueError: If either probability is outside ``[0, 1]`` or their sum exceeds one.
+    """
+    probabilities = (zero_goal_probability, boundary_goal_probability)
+    if any(not math.isfinite(value) or not 0.0 <= value <= 1.0 for value in probabilities):
+        raise ValueError(f"Goal-mixture probabilities must be finite and in [0, 1], got {probabilities}.")
+    if sum(probabilities) > 1.0:
+        raise ValueError(f"Goal-mixture probabilities must sum to at most 1, got {probabilities}.")
+
+    dx = torch.empty(sample_count, device=device).uniform_(*pos_x_range)
+    dy = torch.empty(sample_count, device=device).uniform_(*pos_y_range)
+    category = torch.rand(sample_count, device=device)
+    zero_goal = category < zero_goal_probability
+    boundary_goal = (category >= zero_goal_probability) & (category < zero_goal_probability + boundary_goal_probability)
+    if torch.any(zero_goal):
+        dx[zero_goal] = 0.0
+        dy[zero_goal] = 0.0
+    if torch.any(boundary_goal):
+        boundary_count = int(torch.count_nonzero(boundary_goal).item())
+        choose_upper = torch.rand((boundary_count, 2), device=device) >= 0.5
+        dx[boundary_goal] = torch.where(
+            choose_upper[:, 0],
+            torch.as_tensor(pos_x_range[1], device=device),
+            torch.as_tensor(pos_x_range[0], device=device),
+        )
+        dy[boundary_goal] = torch.where(
+            choose_upper[:, 1],
+            torch.as_tensor(pos_y_range[1], device=device),
+            torch.as_tensor(pos_y_range[0], device=device),
+        )
+    return dx, dy
+
+
+def _next_longitudinal_cycle_goal(
+    previous_goal: torch.Tensor,
+    pos_x_range: tuple[float, float],
+    reverse_cycle: torch.Tensor,
+) -> torch.Tensor:
+    """Advance longitudinal goals through one of two three-command cycles.
+
+    The forward cycle is ``lower -> zero -> upper -> lower`` and the reverse
+    cycle traverses the same anchors in the opposite order. Assigning both
+    cycles across environments balances every directed transition between
+    the lower boundary, zero, and the upper boundary.
+
+    Args:
+        previous_goal: Previous longitudinal displacement command [m].
+        pos_x_range: Lower and upper longitudinal command boundaries [m].
+        reverse_cycle: Whether each sample follows the reverse cycle.
+
+    Returns:
+        Next longitudinal displacement commands [m], with the same shape and
+        dtype as :paramref:`previous_goal`.
+
+    Raises:
+        ValueError: If tensor shapes differ, a previous goal is not finite, or
+            the configured range does not strictly span zero.
+    """
+    if previous_goal.shape != reverse_cycle.shape:
+        raise ValueError(
+            "previous_goal and reverse_cycle must have the same shape, "
+            f"got {previous_goal.shape} and {reverse_cycle.shape}."
+        )
+    lower, upper = pos_x_range
+    if not all(math.isfinite(value) for value in pos_x_range) or not lower < 0.0 < upper:
+        raise ValueError(
+            f"Longitudinal cycle goals require a finite range that strictly spans zero, got {pos_x_range}."
+        )
+    if not bool(torch.all(torch.isfinite(previous_goal))):
+        raise ValueError("previous_goal must contain only finite values.")
+
+    anchors = previous_goal.new_tensor((lower, 0.0, upper))
+    closest_anchor = torch.argmin(
+        torch.abs(previous_goal.unsqueeze(-1) - anchors),
+        dim=-1,
+    )
+    direction = torch.where(
+        reverse_cycle.to(device=previous_goal.device, dtype=torch.bool),
+        -torch.ones_like(closest_anchor),
+        torch.ones_like(closest_anchor),
+    )
+    return anchors[torch.remainder(closest_anchor + direction, len(anchors))]
+
+
 class JumpGoalCommand(CommandTerm):
     """Generates random target jump pose relative to robot, fixed in world frame."""
 
@@ -47,14 +154,42 @@ class JumpGoalCommand(CommandTerm):
 
         self.robot: Articulation = env.scene[cfg.asset_name]
         self.metrics["position_error"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["yaw_error"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["retrigger_reset"] = torch.zeros(self.num_envs, device=self.device)
 
     def _resample_command(self, env_ids: Sequence[int]):
         r = self.cfg.ranges
+        env_ids = torch.as_tensor(env_ids, device=self.device, dtype=torch.long).reshape(-1)
         num_resampling = len(env_ids)
 
         # Generate relative targets
-        dx = torch.zeros(num_resampling, device=self.device).uniform_(*r.pos_x)
-        dy = torch.zeros(num_resampling, device=self.device).uniform_(*r.pos_y)
+        dx, dy = _sample_planar_displacement(
+            num_resampling,
+            r.pos_x,
+            r.pos_y,
+            self.cfg.zero_goal_probability,
+            self.cfg.boundary_goal_probability,
+            self.device,
+        )
+        cycle_probability = self.cfg.retrigger_cycle_goal_probability
+        if not math.isfinite(cycle_probability) or not 0.0 <= cycle_probability <= 1.0:
+            raise ValueError(
+                f"retrigger_cycle_goal_probability must be finite and lie in [0, 1], got {cycle_probability}."
+            )
+        if cycle_probability > 0.0:
+            retrigger_mask = getattr(self._env, "retrigger_reset_mask", None)
+            if retrigger_mask is not None:
+                use_cycle = retrigger_mask[env_ids].bool()
+                if cycle_probability < 1.0:
+                    use_cycle &= torch.rand(num_resampling, device=self.device) < cycle_probability
+                if torch.any(use_cycle):
+                    previous_goal = self.pose_command_b[env_ids, 0].clone()
+                    reverse_cycle = torch.remainder(env_ids, 2).bool()
+                    dx[use_cycle] = _next_longitudinal_cycle_goal(
+                        previous_goal[use_cycle],
+                        r.pos_x,
+                        reverse_cycle[use_cycle],
+                    )
         self.pose_command_b[env_ids, 0] = dx  # cx
         self.pose_command_b[env_ids, 1] = dy  # cy
         self.pose_command_b[env_ids, 2] = 0.0  # cz
@@ -111,14 +246,29 @@ class JumpGoalCommand(CommandTerm):
             self.robot.is_initialized
             and hasattr(self.robot, "data")
             and self.robot.data.root_pos_w.shape[0] == self.num_envs
+            and self.robot.data.root_quat_w.shape[0] == self.num_envs
         ):
             current_pos_w = warp_to_torch(self.robot.data.root_pos_w)[:, :3]
+            current_quat_w = warp_to_torch(self.robot.data.root_quat_w)
         else:
             if hasattr(self._env.scene, "env_origins"):
                 current_pos_w = warp_to_torch(self._env.scene.env_origins).to(self.device)
             else:
                 current_pos_w = torch.zeros((self.num_envs, 3), device=self.device)
+            current_quat_w = torch.tensor(self.robot.cfg.init_state.rot, device=self.device).expand(self.num_envs, -1)
         self.metrics["position_error"] = torch.linalg.norm(self.pose_command_w[:, :2] - current_pos_w[:, :2], dim=-1)
+        _, _, current_yaw = euler_xyz_from_quat(current_quat_w)
+        _, _, target_yaw = euler_xyz_from_quat(self.pose_command_w[:, 3:])
+        yaw_delta = current_yaw - target_yaw
+        self.metrics["yaw_error"] = torch.abs(torch.atan2(torch.sin(yaw_delta), torch.cos(yaw_delta)))
+        retrigger_reset_mask = getattr(self._env, "retrigger_reset_mask", None)
+        if retrigger_reset_mask is None:
+            self.metrics["retrigger_reset"] = torch.zeros(len(current_pos_w), device=current_pos_w.device)
+        else:
+            self.metrics["retrigger_reset"] = retrigger_reset_mask.to(
+                device=current_pos_w.device,
+                dtype=torch.float32,
+            )
 
     def _query_terrain_height(self, x_targets: torch.Tensor, y_targets: torch.Tensor) -> torch.Tensor:
         """Return terrain heights at target positions.
@@ -186,6 +336,20 @@ class JumpGoalCommandCfg(CommandTermCfg):
         yaw = (0.0, 0.0)  # c_phi
 
     ranges: Ranges = Ranges()
+
+    zero_goal_probability: float = 0.0
+    """Probability of sampling an exact in-place landing command."""
+
+    boundary_goal_probability: float = 0.0
+    """Probability of sampling both planar coordinates at their range boundaries."""
+
+    retrigger_cycle_goal_probability: float = 0.0
+    """Probability of cycling a carried longitudinal goal through both boundaries and zero.
+
+    This affects only episodes carried from a preceding safe landing. Even and
+    odd environment indices use opposite cycle directions so training covers
+    every directed transition without changing fresh-start command sampling.
+    """
 
     goal_pose_visualizer_cfg: VisualizationMarkersCfg = FRAME_MARKER_CFG.replace(prim_path="/Visuals/Command/jump_goal")
     """Marker drawn at the commanded landing pose when ``debug_vis`` is set.

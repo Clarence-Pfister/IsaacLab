@@ -9,10 +9,31 @@ from __future__ import annotations
 
 import torch
 
-from isaaclab.utils.math import quat_apply_inverse, yaw_quat
+from isaaclab.managers import SceneEntityCfg
+from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul, quat_unique, yaw_quat
 
 from ..constants import JUMP_PHASES, REFERENCE_MOTION_FPS
 from .motion import get_env_time, get_jump_phase, get_loader, warp_to_torch
+
+
+def obs_projected_gravity(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Return the unit gravity direction in the robot root frame.
+
+    This computes the value directly from :attr:`~isaaclab.assets.ArticulationData.root_quat_w`.
+    The generic cached projection can retain the pre-reset orientation for the first observation
+    after :func:`reference_state_initialization`, while the real IMU and deployment runtime report
+    the written attitude immediately.
+
+    Args:
+        env: Environment from which to read the robot state.
+        asset_cfg: Articulation whose root attitude is used.
+
+    Returns:
+        Unit gravity direction in the root frame, shape ``(num_envs, 3)``.
+    """
+    root_quat_w = warp_to_torch(env.scene[asset_cfg.name].data.root_quat_w)
+    gravity_w = root_quat_w.new_tensor((0.0, 0.0, -1.0)).expand(root_quat_w.shape[0], -1)
+    return quat_apply_inverse(root_quat_w, gravity_w)
 
 
 def obs_future_reference_preview(env) -> torch.Tensor:
@@ -58,6 +79,92 @@ def obs_goal_command(env) -> torch.Tensor:
     return env.command_manager.get_term("jump_goal").pose_command_b
 
 
+def obs_goal_command_remaining_orientation(env) -> torch.Tensor:
+    """Return trigger-relative position and current-body-relative target orientation.
+
+    The position stays latched in the trigger body frame because the physical G1 does not
+    provide root translation. The orientation is instead recomputed from the current IMU
+    attitude and the world-frame landing target. This gives the actor closed-loop heading
+    error over a one-shot jump without requiring an absolute heading reference: both the
+    target and current attitude share the same trigger-time IMU frame.
+
+    Args:
+        env: Environment from which to read the command and robot attitude.
+
+    Returns:
+        Goal pose with trigger-relative position [m] in elements 0--2 and a unit XYZW
+        quaternion from the current body attitude to the target attitude in elements 3--6.
+    """
+    command_term = env.command_manager.get_term("jump_goal")
+    command = command_term.pose_command_b.clone()
+    root_quat_w = warp_to_torch(env.scene["robot"].data.root_quat_w)
+    remaining_quat = quat_mul(quat_inv(root_quat_w), command_term.pose_command_w[:, 3:])
+    command[:, 3:] = quat_unique(remaining_quat)
+    return command
+
+
+def obs_goal_command_remaining_orientation_retrigger(
+    env,
+    retrigger_value: float = 0.25,
+) -> torch.Tensor:
+    """Return the goal command with an explicit repeated-jump state marker.
+
+    The jump task has no vertical displacement command, so element 2 of the
+    seven-element goal observation is otherwise always zero. This term sets it
+    to 0.25 for an episode carried from a safe policy-native landing and leaves
+    it at zero for a fresh reference start. With the task's goal-command scale
+    of 4.0, the actor receives a normalized binary marker without changing its
+    326-element input shape. The command term itself remains unmodified, so the
+    physical landing goal stays on the terrain plane.
+
+    Args:
+        env: Environment from which to read the command, attitude, and reset mode.
+        retrigger_value: Unscaled marker value used for carried episodes.
+
+    Returns:
+        Goal pose with trigger-relative position [m] in elements 0--1, the
+        retrigger marker in element 2, and remaining XYZW orientation in
+        elements 3--6.
+    """
+    command = obs_goal_command_remaining_orientation(env)
+    retrigger_mask = getattr(env, "retrigger_reset_mask", None)
+    if retrigger_mask is not None:
+        command[:, 2] = retrigger_mask.to(device=command.device, dtype=command.dtype) * retrigger_value
+    return command
+
+
+def obs_goal_command_remaining_orientation_retrigger_goal(
+    env,
+    retrigger_value: float = 0.25,
+    retrigger_goal_pos_x_scale: float = 1.0,
+) -> torch.Tensor:
+    """Return a repeat-only marker carrying the longitudinal goal.
+
+    Fresh episodes retain an exact zero in the unused vertical command
+    component. For a carried episode, that component becomes an affine
+    function of the requested longitudinal displacement. This lets a
+    constrained actor adapter learn a repeat-specific command response while
+    leaving the complete fresh-jump observation and actor function unchanged.
+
+    Args:
+        env: Environment from which to read the command, attitude, and reset mode.
+        retrigger_value: Unscaled repeat-channel bias.
+        retrigger_goal_pos_x_scale: Multiplier applied to the longitudinal
+            goal [m] in carried episodes.
+
+    Returns:
+        Goal pose with trigger-relative position [m] in elements 0--1, a
+        repeat-only affine longitudinal signal in element 2, and remaining
+        XYZW orientation in elements 3--6.
+    """
+    command = obs_goal_command_remaining_orientation(env)
+    retrigger_mask = getattr(env, "retrigger_reset_mask", None)
+    if retrigger_mask is not None:
+        mask = retrigger_mask.to(device=command.device, dtype=command.dtype)
+        command[:, 2] = mask * (retrigger_value + retrigger_goal_pos_x_scale * command[:, 0])
+    return command
+
+
 def obs_goal_remaining(env) -> torch.Tensor:
     """Return the displacement still to cover to the goal, in the current heading frame [m].
 
@@ -79,6 +186,45 @@ def obs_goal_remaining(env) -> torch.Tensor:
     root_pos_w = warp_to_torch(robot.data.root_pos_w)[:, :3]
     root_quat_w = warp_to_torch(robot.data.root_quat_w)
     return quat_apply_inverse(yaw_quat(root_quat_w), goal_w - root_pos_w)
+
+
+def obs_goal_remaining_latched(env) -> torch.Tensor:
+    """Return the trigger-time goal displacement throughout the episode [m].
+
+    The physical G1 low-level state contains joint and IMU feedback but no root
+    position. A commandable one-shot jump therefore cannot depend on live world
+    odometry unless an external localization system is added. This term latches
+    :func:`obs_goal_remaining` when each environment resets and exposes that
+    fixed body-heading-frame displacement for the complete jump. The simulation
+    critic may still use the live value.
+
+    Args:
+        env: Environment from which to read the command and reset state.
+
+    Returns:
+        Trigger-time goal displacement, shape ``(num_envs, 3)`` [m].
+    """
+    live_value = obs_goal_remaining(env)
+    episode_step = env.episode_length_buf
+    state_name = "_obs_goal_remaining_latched_state"
+
+    if not hasattr(env, state_name):
+        setattr(
+            env,
+            state_name,
+            {
+                "value": live_value.clone(),
+                "last_step": torch.full_like(episode_step, -1),
+            },
+        )
+    state = getattr(env, state_name)
+
+    # A zero step is an explicit reset marker. This also handles an episode that
+    # terminated immediately at step zero, for which the counter does not decrease.
+    reset = (episode_step < state["last_step"]) | (episode_step == 0)
+    state["value"][reset] = live_value[reset]
+    state["last_step"].copy_(episode_step)
+    return state["value"].clone()
 
 
 def obs_goal_remaining_stale(env, freeze_prob: float = 1.0, drift_std: float = 0.0) -> torch.Tensor:

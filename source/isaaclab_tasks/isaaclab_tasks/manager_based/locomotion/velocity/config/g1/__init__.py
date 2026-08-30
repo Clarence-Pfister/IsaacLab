@@ -82,12 +82,350 @@ gym.register(
 
 
 gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage1-Deploy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage1DeployEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
     id="Isaac-Velocity-Jump-G1-Stage2-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2EnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Translation-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployTranslationEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Uniform-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalUniformEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalSmoothEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Narrow-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Narrow-Handoff-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalSmoothNarrowHandoffEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Narrow-Repeat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalSmoothNarrowRepeatEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-Smooth-Narrow-Repeat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalOdometrySmoothNarrowRepeatEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-Repeat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowRepeatEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-Direct-Repeat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowDirectRepeatEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-Damped-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowDampedEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-Commandable-Repeat-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id=(
+        "Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-"
+        "Commandable-Repeat-Strong-v0"
+    ),
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatStrongEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id=(
+        "Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-"
+        "Commandable-Repeat-Dense-v0"
+    ),
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatDenseEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id=(
+        "Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-"
+        "Commandable-Repeat-Retrigger-Aware-v0"
+    ),
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerAwareEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id=(
+        "Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-"
+        "Commandable-Repeat-Retrigger-Goal-v0"
+    ),
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerGoalEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id=(
+        "Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Latched-Smooth-Narrow-"
+        "Commandable-Repeat-Retrigger-Residual-v0"
+    ),
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:"
+            "G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerChainEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpRetriggerResidualPPORunnerCfg"
+        ),
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalOdometryEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-Smooth-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalOdometrySmoothEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-Smooth-Narrow-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalOdometrySmoothNarrowEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-Smooth-Target-Safe-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalOdometrySmoothTargetSafeEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Contact-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalContactEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Odometry-Robust-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalOdometryRobustEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
     },
 )
 
@@ -153,6 +491,50 @@ gym.register(
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage3EnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage3-Deploy-Translation-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage3DeployTranslationEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage3-Deploy-Longitudinal-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage3DeployLongitudinalEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage3-Narrow-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage3NarrowEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
+    },
+)
+
+
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage3-Narrow-Play-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.jump.jump_env_cfg:G1JumpStage3NarrowEnvCfg_PLAY",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpPPORunnerCfg",
     },
 )

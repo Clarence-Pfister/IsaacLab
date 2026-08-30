@@ -31,6 +31,7 @@ from .constants import (
     G1_23DOF_HOLO_COMPAT_CFG,
     JOINT_ACTION_SCALES,
     JOINT_NAMES,
+    JOINT_POSITION_LIMITS,
     NON_FOOT_CONTACT_SENSOR_NAMES,
     PLAY_JOINT_ACTION_FILTER_ALPHA,
     REFERENCE_DURATION_S,
@@ -40,22 +41,35 @@ from .mdp import (
     LowPassJointPositionActionCfg,
     foot_tracking_error,
     ground_contact,
+    joint_position_limit_margin,
+    joint_target_lower_limit,
+    joint_torque_demand_limit,
     obs_future_reference_preview,
     obs_goal_command,
+    obs_goal_command_remaining_orientation,
+    obs_goal_command_remaining_orientation_retrigger,
+    obs_goal_command_remaining_orientation_retrigger_goal,
     obs_goal_remaining,
-    obs_goal_remaining_stale,
+    obs_goal_remaining_latched,
     obs_jump_phase,
+    obs_projected_gravity,
     penalize_ground_impact,
     penalize_joint_acc,
     penalize_joint_vel,
     penalize_torque_consumption,
+    randomize_contact_compliance,
+    reference_joint_target_deviation,
     reference_motion_complete,
+    reference_or_terminal_state_initialization,
     reference_state_initialization,
     set_contact_sensor,
     target_angular_rate,
+    target_heading,
     target_orientation,
     target_position,
+    target_position_error,
     target_velocity,
+    target_velocity_error,
     task_completion_error,
     track_foot_xy,
     track_foot_z,
@@ -66,7 +80,13 @@ from .mdp import (
     track_root_pos_z,
     track_root_vel_z,
 )
-from .mdp.motion import get_reference_initial_state
+from .mdp.motion import get_reference_initial_pose
+
+# Training and deployment use the same physical target envelope. A target beyond a joint
+# stop does not add reachable motion; it only keeps the implicit PD controller saturated
+# after the joint reaches the stop, which was the main non-transferable behavior in the
+# previous policy.
+_JOINT_ACTION_CLIP = JOINT_POSITION_LIMITS
 
 
 @configclass
@@ -120,6 +140,7 @@ class G1JumpActionsCfg:
         joint_names=JOINT_NAMES,
         scale=JOINT_ACTION_SCALES,
         use_default_offset=True,
+        clip=_JOINT_ACTION_CLIP,
     )
 
 
@@ -130,6 +151,7 @@ class G1JumpPlayActionsCfg:
         joint_names=JOINT_NAMES,
         scale=JOINT_ACTION_SCALES,
         use_default_offset=True,
+        clip=_JOINT_ACTION_CLIP,
         alpha=PLAY_JOINT_ACTION_FILTER_ALPHA,
     )
 
@@ -151,6 +173,7 @@ class G1JumpDeployActionsCfg:
         joint_names=JOINT_NAMES,
         scale=JOINT_ACTION_SCALES,
         use_default_offset=True,
+        clip=_JOINT_ACTION_CLIP,
         alpha=PLAY_JOINT_ACTION_FILTER_ALPHA,
     )
 
@@ -194,7 +217,7 @@ class G1JumpObservationsCfg:
             history_length=4,
         )
         projected_gravity = ObsTerm(
-            func=mdp.projected_gravity,
+            func=obs_projected_gravity,
             params={"asset_cfg": SceneEntityCfg("robot")},
             history_length=4,
         )
@@ -325,6 +348,14 @@ class G1JumpRewardsCfg:
             "phase_weights": (0.0, 1.0, 2.0, 4.0, 8.0, 12.0),
         },
     )
+    target_position_error = RewTerm(
+        func=target_position_error,
+        weight=0.0,
+        params={
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            "retrigger_only": False,
+        },
+    )
     target_velocity = RewTerm(
         func=target_velocity,
         weight=1.0,
@@ -333,11 +364,24 @@ class G1JumpRewardsCfg:
             "phase_weights": (0.0, 0.0, 3.0, 3.0, 1.0, 0.0),
         },
     )
+    target_velocity_error = RewTerm(
+        func=target_velocity_error,
+        weight=0.0,
+        params={"phase_weights": (0.0, 0.0, 1.0, 1.0, 0.0, 0.0)},
+    )
     target_orientation = RewTerm(
         func=target_orientation,
         weight=1.0,
         params={
             "gradient": 13.87,
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        },
+    )
+    target_heading = RewTerm(
+        func=target_heading,
+        weight=1.0,
+        params={
+            "gradient": 30.0,
             "phase_weights": (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
         },
     )
@@ -372,6 +416,47 @@ class G1JumpRewardsCfg:
             "phase_weights": (1.0, 1.0, 0.25, 0.5, 2.0, 4.0),
         },
     )
+    joint_torque_demand_limit = RewTerm(
+        func=joint_torque_demand_limit,
+        weight=-2.0,
+        params={
+            "soft_ratio": 0.9,
+            "maximum_excess": 2.0,
+            # Takeoff and flight may briefly need the full rated effort. Persistent
+            # saturation while standing or absorbing landing is never acceptable.
+            "phase_weights": (1.0, 1.0, 0.25, 0.25, 1.0, 1.0),
+        },
+    )
+    knee_target_lower_limit = RewTerm(
+        func=joint_target_lower_limit,
+        weight=0.0,
+        params={
+            "lower_limit": 0.1,
+            "normalization": 0.1,
+            "phase_weights": (0.0, 0.0, 0.0, 0.0, 1.0, 2.0),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_knee_joint"]),
+        },
+    )
+    ankle_roll_position_limit_margin = RewTerm(
+        func=joint_position_limit_margin,
+        weight=0.0,
+        params={
+            "margin": 0.01,
+            "phase_weights": (1.0, 2.0, 4.0, 4.0, 8.0, 10.0),
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_ankle_roll_joint"]),
+        },
+    )
+    reference_joint_target_deviation = RewTerm(
+        func=reference_joint_target_deviation,
+        weight=-10.0,
+        params={
+            # The start and settled phases should command targets near the reference.
+            # Crouch and landing retain room for command-dependent balance corrections,
+            # while takeoff and flight can use larger residuals to reach the goal.
+            "phase_weights": (4.0, 1.0, 0.25, 0.25, 1.0, 2.0),
+        },
+    )
+    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-0.01)
     penalize_joint_vel = RewTerm(
         func=penalize_joint_vel,
         weight=1.0,
@@ -452,9 +537,28 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
             getattr(self.scene, sensor_name).update_period = self.sim.dt
         # Keep default_joint_pos, non-RSI resets, and the default action offset aligned
         # with reference frame 0.
-        init_joint_pos, init_root_z = get_reference_initial_state()
+        init_joint_pos, init_root_pos, init_root_quat = get_reference_initial_pose()
         self.scene.robot.init_state.joint_pos = init_joint_pos
-        self.scene.robot.init_state.pos = (0.0, 0.0, init_root_z)
+        self.scene.robot.init_state.pos = (0.0, 0.0, init_root_pos[2])
+        self.scene.robot.init_state.rot = init_root_quat
+
+
+@configclass
+class G1JumpStage1DeployEnvCfg(G1JumpEnvCfg):
+    """In-place jump imitation through the deployment action filter.
+
+    This stage keeps the fixed Stage 1 goal while introducing the target filter used by the
+    robot. Its strong reference-target prior prevents the actor from replacing the recorded
+    motion with targets that merely drive the implicit PD controller into effort clipping.
+    """
+
+    actions: G1JumpDeployActionsCfg = G1JumpDeployActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.rewards.reference_joint_target_deviation.weight = -50.0
+        self.rewards.action_rate.weight = -0.5
 
 
 @configclass
@@ -482,6 +586,15 @@ class G1JumpStage2EnvCfg(G1JumpEnvCfg):
         self.commands.jump_goal.ranges.pos_y = (-0.3, 0.3)
         self.commands.jump_goal.ranges.yaw = (-30.0 * torch.pi / 180.0, 30.0 * torch.pi / 180.0)
 
+        # Introduce the deployable observation contract while the goal envelope is
+        # still narrow. The physical G1 supplies no root position in LowState, so
+        # the actor receives the trigger-time displacement throughout the jump;
+        # the asymmetric critic retains true remaining displacement in simulation.
+        self.observations.policy.goal_remaining.func = obs_goal_remaining_latched
+        self.observations.policy.goal_remaining.params = {}
+        self.observations.critic.goal_remaining.func = obs_goal_remaining
+        self.observations.critic.goal_remaining.params = {}
+
         # The reference motion cannot describe where the robot was told to go, so the terms
         # that would hold it on the reference's heading and ground track are switched off.
         # Their task-space counterparts below take over.
@@ -497,8 +610,634 @@ class G1JumpStage2EnvCfg(G1JumpEnvCfg):
         # Heading is now a task, not an imitation target. Orientation is weighted towards
         # landing and standing where the commanded turn must actually hold; angular rate is
         # weighted towards take-off and flight, which is when the turn is executed.
+        #
+        # The base-task kernels were calibrated against the much larger angular rates in the
+        # reference motion. At this stage, ignoring the largest commanded turn still retained
+        # 39.5% of the orientation score and 98.8% of the angular-rate score. Recalibrate both
+        # so turning supplies a meaningful gradient instead of an almost constant bonus.
+        self.rewards.target_orientation.params["gradient"] = 30.0
         self.rewards.target_orientation.params["phase_weights"] = (0.0, 1.0, 2.0, 3.0, 6.0, 8.0)
+        self.rewards.target_angular_rate.params["gradient"] = 7.0
         self.rewards.target_angular_rate.params["phase_weights"] = (0.0, 2.0, 4.0, 3.0, 2.0, 0.0)
+
+
+@configclass
+class G1JumpStage2DeployEnvCfg(G1JumpStage2EnvCfg):
+    """Narrow command training through the deployment action filter.
+
+    The reference-target prior is relaxed from Stage 1 so the policy can create the joint
+    asymmetries needed for translation and turning while retaining smooth, physical targets.
+    """
+
+    actions: G1JumpDeployActionsCfg = G1JumpDeployActionsCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.rewards.reference_joint_target_deviation.weight = -20.0
+        self.rewards.action_rate.weight = -0.1
+
+
+@configclass
+class G1JumpStage2DeployTranslationEnvCfg(G1JumpStage2DeployEnvCfg):
+    """Translation-first deployment curriculum with relative attitude feedback.
+
+    This stage narrows translation and holds the requested turn at zero while the policy
+    learns to remove the reference motion's repeatable heading bias. The actor receives the
+    remaining target orientation from the simulated IMU using the same calculation available
+    from G1 ``LowState`` during deployment. Turning is introduced only after this stage can
+    land accurately without accumulating uncommanded yaw.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.2, 0.2)
+        self.commands.jump_goal.ranges.pos_y = (-0.15, 0.15)
+        self.commands.jump_goal.ranges.yaw = (0.0, 0.0)
+        self.observations.policy.goal_command.func = obs_goal_command_remaining_orientation
+        self.observations.critic.goal_command.func = obs_goal_command_remaining_orientation
+        self.rewards.target_heading.params["gradient"] = 30.0
+        self.rewards.target_heading.params["phase_weights"] = (0.0, 0.0, 0.0, 0.0, 8.0, 12.0)
+        # Keep instantaneous implicit-PD demand below the standard G1's advertised
+        # 90 N.m knee maximum: 60% of the model's 139 N.m envelope is 83.4 N.m.
+        self.actions.joint_pos.effort_limit_ratio = 0.6
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalEnvCfg(G1JumpStage2DeployTranslationEnvCfg):
+    """Signed forward/backward deployment curriculum used by the first commandable policy.
+
+    Lateral displacement and heading are deliberately disabled until their command-response
+    gains pass the same deployment evaluation as the longitudinal axis. The actor and critic
+    goal features use the scale baked into the selected checkpoint's training contract.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_y = (0.0, 0.0)
+        self.commands.jump_goal.zero_goal_probability = 0.25
+        self.commands.jump_goal.boundary_goal_probability = 0.5
+        self.observations.policy.goal_remaining.scale = 4.0
+        self.observations.critic.goal_remaining.scale = 4.0
+        self.observations.policy.goal_command.scale = 4.0
+        self.observations.critic.goal_command.scale = 4.0
+
+        self.rewards.target_position.weight = 8.0
+        self.rewards.target_velocity.weight = 0.0
+        self.rewards.target_velocity_error.weight = -50.0
+        self.rewards.target_heading.weight = 3.0
+        self.rewards.reference_joint_target_deviation.weight = -5.0
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalUniformEnvCfg(G1JumpStage2DeployLongitudinalEnvCfg):
+    """Uniform-dominant curriculum for a smooth longitudinal command response.
+
+    The endpoint-heavy curriculum is useful for establishing signed authority, but it
+    permits the actor to learn disconnected endpoint behaviors. This stage retains a
+    small number of exact zero and boundary commands while drawing most goals uniformly
+    from the interior of the trained range.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.zero_goal_probability = 0.1
+        self.commands.jump_goal.boundary_goal_probability = 0.1
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothEnvCfg(G1JumpStage2DeployLongitudinalUniformEnvCfg):
+    """Latched-feedback curriculum with bandwidth-limited leg position targets.
+
+    This retains the trigger-latched horizontal command available from G1
+    :class:`LowState` while limiting how quickly policy-state differences can become
+    distinct leg contact modes.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.actions.joint_pos.alpha = {
+            ".*_hip_.*": 0.3,
+            ".*_knee_joint": 0.3,
+            ".*_ankle_.*": 0.3,
+        }
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg(G1JumpStage2DeployLongitudinalSmoothEnvCfg):
+    """Deployment task restricted to the validated longitudinal command range.
+
+    The selected policy remains upright over its wider training range, but MuJoCo
+    validation identifies nonlinear forward overshoot outside this narrower envelope.
+    Exporting through this task records and enforces only the validated range.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.1, 0.1)
+        action_clip = dict(self.actions.joint_pos.clip)
+        for joint_name in ("left_knee_joint", "right_knee_joint"):
+            _, upper = action_clip[joint_name]
+            action_clip[joint_name] = (0.1, upper)
+        self.actions.joint_pos.clip = action_clip
+        self.actions.joint_pos.lower_limit_velocity_lookahead = {".*_knee_joint": 0.028}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothNarrowRepeatEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
+    """Latched deployment contract for policies trained to repeat narrow jumps."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.actions.joint_pos.lower_limit_velocity_lookahead = {".*_knee_joint": 0.032}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowDampedEnvCfg(
+    G1JumpStage2DeployLongitudinalSmoothNarrowRepeatEnvCfg
+):
+    """Deployment contract with additional ankle-roll landing damping."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.scene.robot.actuators["feet"].damping = {
+            ".*_ankle_pitch_joint": 2.0,
+            ".*_ankle_roll_joint": 4.0,
+        }
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothNarrowHandoffEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
+    """Fine-tuning task for a gravity-loaded stand-to-jump handoff.
+
+    The normal jump reset starts at the exact first reference frame and applies the
+    policy immediately. A deployment FSM instead holds the robot under gravity before
+    confirmation, so the trigger state contains small joint deflections and residual
+    velocities. This task retains the narrow signed command and deployment action
+    contracts while perturbing the physical reset state around that handoff envelope.
+    """
+
+    @configclass
+    class EventCfg(G1JumpEventCfg):
+        reset_to_reference = EventTerm(
+            func=reference_state_initialization,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "init_start_prob": 0.0,
+                "roll_range": (-0.035, 0.035),
+                "pitch_range": (-0.035, 0.035),
+                "lin_vel_range": (-0.05, 0.05),
+            },
+        )
+        reset_handoff_leg_state = EventTerm(
+            func=mdp.reset_joints_by_offset,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=[".*_hip_.*", ".*_knee_joint"],
+                ),
+                "position_range": (-0.03, 0.03),
+                "velocity_range": (-0.15, 0.15),
+            },
+        )
+        reset_handoff_ankle_state = EventTerm(
+            func=mdp.reset_joints_by_offset,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=[".*_ankle_.*"]),
+                "position_range": (-0.08, 0.08),
+                "velocity_range": (-0.2, 0.2),
+            },
+        )
+        reset_handoff_upper_state = EventTerm(
+            func=mdp.reset_joints_by_offset,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=["waist_.*", ".*_shoulder_.*", ".*_elbow_joint", ".*_wrist_.*"],
+                ),
+                "position_range": (-0.02, 0.02),
+                "velocity_range": (-0.1, 0.1),
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometrySmoothNarrowRepeatEnvCfg(
+    G1JumpStage2DeployLongitudinalSmoothNarrowRepeatEnvCfg
+):
+    """Fine-tuning task that chains safe policy landings into new jump commands.
+
+    Eligible time-limit resets retain the robot's terminal pose, translate it back to
+    its environment origin, reset its velocity and motion phase to zero, and sample a
+    new goal. Failed, excessively tilted, or joint-limit-violating states use the normal
+    frame-zero reset instead. Fine-tuning retains the selected checkpoint's live
+    remaining-displacement observation; export and deployment still substitute the
+    previously validated latched signal with the same shape and scale.
+    """
+
+    @configclass
+    class EventCfg(G1JumpEventCfg):
+        reset_to_reference = EventTerm(
+            func=reference_or_terminal_state_initialization,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "retrigger_probability": 1.0,
+                "init_start_prob": 0.0,
+                "root_height_range": (0.65, 0.9),
+                "max_tilt_rad": 0.15,
+                "max_root_linear_speed": 0.5,
+                "max_root_angular_speed": 2.0,
+                "max_joint_speed": 5.0,
+                "joint_limit_margin": 0.0,
+                "joint_limit_tolerance": 0.001,
+                "zero_retrigger_velocity": True,
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.goal_remaining.func = obs_goal_remaining
+        self.observations.policy.goal_remaining.params = {}
+        self.rewards.ankle_roll_position_limit_margin.weight = -20.0
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowRepeatEnvCfg(
+    G1JumpStage2DeployLongitudinalOdometrySmoothNarrowRepeatEnvCfg
+):
+    """Repeat curriculum matching the latched, stand-to-phase-zero FSM handoff.
+
+    Each complete episode holds the policy's final STAND reference for one second.
+    Eligible terminal poses then start a new relative goal at rest and spend 0.26 s
+    at phase zero, matching the 14 phase-zero evaluations made by the 50 Hz FSM's
+    0.25 s preparation plus its first jump tick. Exact zero and boundary commands
+    remain frequent while interior goals preserve a continuous command response.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        terminal_hold_duration_s = 1.0
+        retrigger_prepare_duration_s = 0.26
+        self.events.reset_to_reference.params["terminal_hold_duration_s"] = terminal_hold_duration_s
+        self.events.reset_to_reference.params["retrigger_prepare_duration_s"] = retrigger_prepare_duration_s
+        self.events.reset_to_reference.params["fresh_prepare_duration_s"] = retrigger_prepare_duration_s
+        # Preserve the first-jump command map while exposing enough policy-native landings
+        # to learn the repeated handoff. Both reset paths now receive the same phase-zero
+        # preparation, so the actor can converge them to a common cyclic start target.
+        self.events.reset_to_reference.params["retrigger_probability"] = 0.25
+        self.terminations.time_out.params = {"hold_duration_s": terminal_hold_duration_s}
+        self.episode_length_s = REFERENCE_DURATION_S + terminal_hold_duration_s + retrigger_prepare_duration_s
+
+        self.observations.policy.goal_remaining.func = obs_goal_remaining_latched
+        self.observations.policy.goal_remaining.params = {}
+        self.commands.jump_goal.zero_goal_probability = 0.25
+        self.commands.jump_goal.boundary_goal_probability = 0.5
+        self.rewards.target_position.weight = 16.0
+        self.rewards.target_velocity_error.weight = -75.0
+        self.rewards.reference_joint_target_deviation.weight = -20.0
+        self.rewards.reference_joint_target_deviation.params["phase_weights"] = (
+            8.0,
+            2.0,
+            0.25,
+            0.25,
+            2.0,
+            10.0,
+        )
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowDirectRepeatEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowRepeatEnvCfg
+):
+    """Fine-tune direct policy-stand retriggers with an ankle safety margin.
+
+    Every safe full-length landing is reused at rest with a newly sampled
+    trigger-latched command. The new episode starts at phase zero immediately,
+    matching an FSM that holds the previous final STAND controller until the
+    operator confirms the next jump. A wider ankle-roll limit margin penalizes
+    landing impulses before they reach the modeled joint stop.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        terminal_hold_duration_s = 1.0
+        self.events.reset_to_reference.params["terminal_hold_duration_s"] = terminal_hold_duration_s
+        self.events.reset_to_reference.params["retrigger_prepare_duration_s"] = 0.0
+        self.events.reset_to_reference.params["fresh_prepare_duration_s"] = 0.0
+        self.events.reset_to_reference.params["retrigger_probability"] = 1.0
+        self.events.reset_to_reference.params["retrigger_after_retrigger_probability"] = 1.0
+        self.terminations.time_out.params["hold_duration_s"] = terminal_hold_duration_s
+        self.episode_length_s = REFERENCE_DURATION_S + terminal_hold_duration_s
+        self.rewards.ankle_roll_position_limit_margin.weight = -100.0
+        self.rewards.ankle_roll_position_limit_margin.params["margin"] = 0.04
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowDirectRepeatEnvCfg
+):
+    """Fine-tune settled repeated jumps without sacrificing fresh commands.
+
+    Fresh reference starts remain half of eligible resets. The other half carry
+    a four-second policy-native stand into a newly latched command, matching the
+    repeated FSM after it has converged. An unsaturated terminal position cost is
+    applied only to those carried episodes so the actor learns their systematic
+    handoff bias while retaining the original start-state command map.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        terminal_hold_duration_s = 4.0
+        self.events.reset_to_reference.params["terminal_hold_duration_s"] = terminal_hold_duration_s
+        self.events.reset_to_reference.params["retrigger_probability"] = 0.5
+        self.terminations.time_out.params["hold_duration_s"] = terminal_hold_duration_s
+        self.episode_length_s = REFERENCE_DURATION_S + terminal_hold_duration_s
+        self.rewards.target_position_error.weight = -200.0
+        self.rewards.target_position_error.params["phase_weights"] = (0.0, 0.0, 0.0, 0.0, 4.0, 12.0)
+        self.rewards.target_position_error.params["retrigger_only"] = True
+        self.rewards.ankle_roll_position_limit_margin.weight = -50.0
+        self.rewards.ankle_roll_position_limit_margin.params["margin"] = 0.03
+        self.scene.robot.actuators["feet"].damping = {
+            ".*_ankle_pitch_joint": 2.0,
+            ".*_ankle_roll_joint": 4.0,
+        }
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatStrongEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatEnvCfg
+):
+    """Emphasize signed command response from settled repeated-jump states.
+
+    Three quarters of eligible resets carry a safe policy-native landing into
+    the next relative command. The unsaturated landing error dominates the
+    bounded proximity reward, while stronger takeoff-velocity and ankle-margin
+    costs retain a usable command gradient without accepting joint-stop contact.
+    Fresh reference starts remain in the batch to constrain first-jump behavior.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.events.reset_to_reference.params["retrigger_probability"] = 0.75
+        self.commands.jump_goal.zero_goal_probability = 0.2
+        self.commands.jump_goal.boundary_goal_probability = 0.6
+        self.rewards.target_position.weight = 0.0
+        self.rewards.target_position_error.weight = -2000.0
+        self.rewards.target_velocity_error.weight = -150.0
+        self.rewards.ankle_roll_position_limit_margin.weight = -200.0
+        self.rewards.ankle_roll_position_limit_margin.params["margin"] = 0.04
+        self.rewards.reference_joint_target_deviation.params["phase_weights"] = (
+            8.0,
+            2.0,
+            0.05,
+            0.05,
+            2.0,
+            10.0,
+        )
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatDenseEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatStrongEnvCfg
+):
+    """Give command tracking dense credit before and through touchdown.
+
+    The carried-state landing error otherwise arrives mostly in the four-second
+    terminal hold, after the takeoff actions that caused it have left a short
+    PPO rollout. This variant applies unsaturated position error from takeoff
+    onward and raises the signed planar-velocity cost during takeoff and flight.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.rewards.target_position_error.weight = -500.0
+        self.rewards.target_position_error.params["phase_weights"] = (0.0, 0.0, 2.0, 4.0, 12.0, 2.0)
+        self.rewards.target_position_error.params["retrigger_only"] = False
+        self.rewards.target_velocity_error.weight = -1000.0
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerAwareEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatDenseEnvCfg
+):
+    """Condition the policy explicitly on fresh versus carried jump state.
+
+    Joint and IMU feedback alone leave the policy to infer whether phase zero
+    began at the canonical reference pose or at its preceding policy-native
+    landing. The FSM already knows that state. This task exposes it through the
+    otherwise-unused vertical goal-command component while retaining the
+    checkpoint's 326-element observation shape.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.goal_command.func = obs_goal_command_remaining_orientation_retrigger
+        self.observations.critic.goal_command.func = obs_goal_command_remaining_orientation_retrigger
+
+        # Preserve the bounded goal reward that shaped reliable fresh jumps,
+        # while applying the signed position correction only to carried state.
+        self.rewards.target_position.weight = 16.0
+        self.rewards.target_position_error.weight = -300.0
+        self.rewards.target_position_error.params["retrigger_only"] = True
+        self.rewards.target_velocity_error.weight = -150.0
+
+        # A repeat is usable only if the preceding policy-native stand leaves
+        # enough ankle-roll authority for the next takeoff.
+        self.rewards.ankle_roll_position_limit_margin.weight = -1000.0
+        self.rewards.ankle_roll_position_limit_margin.params["margin"] = 0.05
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerGoalEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerAwareEnvCfg
+):
+    """Expose the longitudinal goal through a repeat-only actor channel.
+
+    The vertical command component remains exactly zero throughout every
+    fresh episode. Carried episodes receive ``0.25 + goal_pos_x`` before the
+    inherited observation scale, allowing the retrigger adapter to learn a
+    signed command correction without changing the validated first jump.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        params = {
+            "retrigger_value": 0.25,
+            "retrigger_goal_pos_x_scale": 1.0,
+        }
+        self.observations.policy.goal_command.func = obs_goal_command_remaining_orientation_retrigger_goal
+        self.observations.policy.goal_command.params = dict(params)
+        self.observations.critic.goal_command.func = obs_goal_command_remaining_orientation_retrigger_goal
+        self.observations.critic.goal_command.params = dict(params)
+        self.events.reset_to_reference.params["use_soft_joint_limits"] = False
+        self.events.reset_to_reference.params["joint_limit_margin"] = 0.01
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerChainEnvCfg(
+    G1JumpStage2DeployLongitudinalLatchedSmoothNarrowCommandableRepeatRetriggerGoalEnvCfg
+):
+    """Train the repeat residual on uninterrupted signed command chains.
+
+    Every safe landing is carried into another relative command so later jumps
+    are represented as often as the first retrigger. Exact zero and both
+    longitudinal boundaries span the deployable command set. Unsaturated
+    position and velocity costs supply signed credit through landing, while a
+    stronger termination cost rejects policies that gain distance by falling.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.events.reset_to_reference.params["retrigger_probability"] = 1.0
+        self.commands.jump_goal.retrigger_cycle_goal_probability = 1.0
+        self.commands.jump_goal.zero_goal_probability = 0.2
+        self.commands.jump_goal.boundary_goal_probability = 0.8
+        self.rewards.target_position.weight = 0.0
+        self.rewards.target_position_error.weight = -2000.0
+        self.rewards.target_position_error.params["phase_weights"] = (
+            0.0,
+            0.0,
+            2.0,
+            4.0,
+            16.0,
+            4.0,
+        )
+        self.rewards.target_position_error.params["retrigger_only"] = True
+        self.rewards.target_velocity_error.weight = -1000.0
+        self.rewards.termination_penalty.weight = -500.0
+        self.rewards.ankle_roll_position_limit_margin.params["retrigger_only"] = True
+        self.rewards.ankle_roll_position_limit_margin.params["use_soft_joint_limits"] = False
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometryEnvCfg(G1JumpStage2DeployLongitudinalUniformEnvCfg):
+    """Longitudinal curriculum with live remaining-displacement feedback.
+
+    This diagnostic stage keeps the deployable observation dimensions and action contract
+    unchanged while replacing the actor's trigger-latched displacement with live odometry.
+    It is suitable for deployment only when the runtime supplies validated horizontal
+    odometry; G1 ``LowState`` does not provide that measurement directly.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.goal_remaining.func = obs_goal_remaining
+        self.observations.policy.goal_remaining.params = {}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometrySmoothEnvCfg(G1JumpStage2DeployLongitudinalSmoothEnvCfg):
+    """Odometry curriculum with bandwidth-limited leg position targets.
+
+    The faster deployment filter lets small policy-state differences become distinct
+    contact modes before the target interpolation can attenuate them. This stage lowers
+    the leg filter bandwidth while preserving the checkpoint's observations, target
+    scaling, torque projection, and zero-delay contract.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.goal_remaining.func = obs_goal_remaining
+        self.observations.policy.goal_remaining.params = {}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometrySmoothNarrowEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
+    """Safe-target narrow curriculum with live remaining-displacement feedback."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.goal_remaining.func = obs_goal_remaining
+        self.observations.policy.goal_remaining.params = {}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometrySmoothTargetSafeEnvCfg(G1JumpStage2DeployLongitudinalOdometrySmoothEnvCfg):
+    """Narrow live-feedback curriculum that teaches knee-target stop avoidance."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.1, 0.1)
+        self.rewards.knee_target_lower_limit.weight = -2.0
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalContactEnvCfg(G1JumpStage2DeployLongitudinalEnvCfg):
+    """Contact-robust bridge between longitudinal command training and full Stage 3.
+
+    This curriculum varies only contact compliance. It lets the policy adapt to the
+    dominant Isaac-to-MuJoCo mismatch before introducing mass, center-of-mass, gain,
+    sensing, push, and latency randomization together.
+    """
+
+    @configclass
+    class EventCfg(G1JumpEventCfg):
+        contact_compliance = EventTerm(
+            func=randomize_contact_compliance,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "stiffness_range": (1.0e5, 1.0e6),
+                "damping_ratio_range": (0.8, 1.2),
+                "rigid_probability": 0.25,
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalOdometryRobustEnvCfg(G1JumpStage2DeployLongitudinalContactEnvCfg):
+    """Odometry curriculum with sensing noise and contact variation.
+
+    This bridge targets excessive closed-loop policy gain without introducing mass,
+    center-of-mass, actuator-gain, push, or action-delay randomization. It retains the
+    live horizontal odometry requirement of
+    :class:`G1JumpStage2DeployLongitudinalOdometryEnvCfg`.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.zero_goal_probability = 0.1
+        self.commands.jump_goal.boundary_goal_probability = 0.1
+        self.observations.policy.enable_corruption = True
+        self.observations.policy.joint_pos.noise = UniformNoiseCfg(n_min=-0.01, n_max=0.01, operation="add")
+        self.observations.policy.joint_vel.noise = UniformNoiseCfg(n_min=-1.0, n_max=1.0, operation="add")
+        self.observations.policy.base_ang_vel.noise = UniformNoiseCfg(n_min=-0.3, n_max=0.3, operation="add")
+        self.observations.policy.projected_gravity.noise = UniformNoiseCfg(n_min=-0.1, n_max=0.1, operation="add")
+        self.observations.policy.goal_remaining.func = obs_goal_remaining
+        self.observations.policy.goal_remaining.params = {}
+        self.observations.policy.goal_remaining.noise = UniformNoiseCfg(n_min=-0.02, n_max=0.02, operation="add")
 
 
 @configclass
@@ -585,6 +1324,22 @@ class G1JumpStage3EnvCfg(G1JumpStage2WideLandEnvCfg):
 
     @configclass
     class EventCfg(G1JumpEventCfg):
+        # The reference's 7.49 deg pitch is correct against feet-flat kinematics, but an
+        # identical attitude and velocity on every reset gives the policy unrealistic zero
+        # variance. Mild floor slope and standing residuals fit within +/-3 deg; at the 0.78 m
+        # pelvis height that changes foot height by only about 1.1 mm, below the existing
+        # roughly 5 mm ground penetration, so height compensation is unnecessary.
+        reset_to_reference = EventTerm(
+            func=reference_state_initialization,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "init_start_prob": 0.2,
+                "roll_range": (-0.052, 0.052),
+                "pitch_range": (-0.052, 0.052),
+                "lin_vel_range": (-0.05, 0.05),
+            },
+        )
         # These contact ranges cover low-grip surfaces through high-grip rubber contact and
         # allow imperfectly inelastic contacts without introducing highly elastic impacts.
         physics_material = EventTerm(
@@ -649,20 +1404,125 @@ class G1JumpStage3EnvCfg(G1JumpStage2WideLandEnvCfg):
         # Zero to two control steps represents 0-40 ms latency at the 50 Hz policy rate.
         self.actions.joint_pos.min_delay_steps = 0
         self.actions.joint_pos.max_delay_steps = 2
+        self.rewards.action_rate.weight = -0.1
 
         self.observations.policy.enable_corruption = True
         self.observations.policy.joint_pos.noise = UniformNoiseCfg(n_min=-0.01, n_max=0.01, operation="add")
         self.observations.policy.joint_vel.noise = UniformNoiseCfg(n_min=-1.0, n_max=1.0, operation="add")
         self.observations.policy.base_ang_vel.noise = UniformNoiseCfg(n_min=-0.3, n_max=0.3, operation="add")
         self.observations.policy.projected_gravity.noise = UniformNoiseCfg(n_min=-0.1, n_max=0.1, operation="add")
-        self.observations.policy.goal_remaining.func = obs_goal_remaining_stale
-        self.observations.policy.goal_remaining.params = {"freeze_prob": 0.8, "drift_std": 0.005}
+        # G1 LowState has no root position once the native controller is released.
+        # Keep the actor conditioned on the trigger-time relative goal so real inference
+        # needs only joint and IMU feedback. The privileged critic remains closed-loop.
+        self.observations.policy.goal_remaining.func = obs_goal_remaining_latched
+        self.observations.policy.goal_remaining.params = {}
         self.observations.policy.goal_remaining.noise = UniformNoiseCfg(n_min=-0.02, n_max=0.02, operation="add")
 
         # The critic is simulation-only and must not inherit actor corruption or stale odometry.
         self.observations.critic.enable_corruption = False
         self.observations.critic.goal_remaining.func = obs_goal_remaining
         self.observations.critic.goal_remaining.params = {}
+
+
+@configclass
+class G1JumpStage3DeployTranslationEnvCfg(G1JumpStage3EnvCfg):
+    """Sim-to-real robustness stage for the narrow translation-only policy.
+
+    This stage preserves the deployable remaining-attitude observation introduced by
+    :class:`G1JumpStage2DeployTranslationEnvCfg` while adding Stage 3 dynamics, sensing,
+    and latency randomization. Contact compliance spans soft shoe/floor contact through
+    rigid PhysX contact so the policy cannot specialize to a single solver response.
+    """
+
+    @configclass
+    class EventCfg(G1JumpStage3EnvCfg.EventCfg):
+        contact_compliance = EventTerm(
+            func=randomize_contact_compliance,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "stiffness_range": (1.0e4, 1.0e6),
+                "damping_ratio_range": (0.7, 1.4),
+                "rigid_probability": 0.25,
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.2, 0.2)
+        self.commands.jump_goal.ranges.pos_y = (-0.15, 0.15)
+        self.commands.jump_goal.ranges.yaw = (0.0, 0.0)
+        self.observations.policy.goal_command.func = obs_goal_command_remaining_orientation
+        self.observations.critic.goal_command.func = obs_goal_command_remaining_orientation
+
+        self.rewards.target_position.params["gradient"] = 21.07
+        self.rewards.target_orientation.params["gradient"] = 30.0
+        self.rewards.target_heading.params["gradient"] = 30.0
+        self.rewards.target_heading.params["phase_weights"] = (0.0, 0.0, 0.0, 0.0, 8.0, 12.0)
+
+        # Unitree advertises a 90 N.m maximum knee torque for the standard G1. Sixty
+        # percent of the 139 N.m model envelope is 83.4 N.m, leaving margin below that
+        # maximum while applying the same conservative fraction to every actuator.
+        self.rewards.joint_torque_demand_limit.weight = -50.0
+        self.rewards.joint_torque_demand_limit.params["soft_ratio"] = 0.6
+        self.actions.joint_pos.effort_limit_ratio = 0.6
+
+
+@configclass
+class G1JumpStage3DeployLongitudinalEnvCfg(G1JumpStage3DeployTranslationEnvCfg):
+    """Robustness curriculum for the signed forward/backward deployment policy."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_y = (0.0, 0.0)
+        self.commands.jump_goal.zero_goal_probability = 0.25
+        self.commands.jump_goal.boundary_goal_probability = 0.5
+        self.observations.policy.goal_remaining.scale = 4.0
+        self.observations.critic.goal_remaining.scale = 4.0
+        self.observations.policy.goal_command.scale = 4.0
+        self.observations.critic.goal_command.scale = 4.0
+
+        self.rewards.target_position.weight = 8.0
+        self.rewards.target_velocity.weight = 0.0
+        self.rewards.target_velocity_error.weight = -50.0
+        self.rewards.target_heading.weight = 3.0
+        self.rewards.reference_joint_target_deviation.weight = -5.0
+
+
+@configclass
+class G1JumpStage3NarrowEnvCfg(G1JumpStage3EnvCfg):
+    """Sim-to-real stage that retains the narrow Stage 2 command envelope.
+
+    This task introduces the deployment action filter, latency, observation noise, and
+    dynamics randomization without simultaneously increasing the commanded displacement.
+    Once this stage meets the deployment acceptance thresholds, training can continue with
+    :class:`G1JumpStage3EnvCfg` to widen the command envelope independently.
+    """
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.commands.jump_goal.ranges.pos_x = (-0.4, 0.4)
+        self.commands.jump_goal.ranges.pos_y = (-0.3, 0.3)
+        self.commands.jump_goal.ranges.yaw = (-30.0 * torch.pi / 180.0, 30.0 * torch.pi / 180.0)
+
+        # Restore the kernels calibrated for the narrow goal distribution. The wide-stage
+        # kernels deliberately trade precision for gradient at metre-scale errors.
+        self.rewards.target_position.params["gradient"] = 21.07
+        self.rewards.target_orientation.params["gradient"] = 30.0
+
+
+@configclass
+class G1JumpStage3NarrowEnvCfg_PLAY(G1JumpStage3NarrowEnvCfg):
+    def __post_init__(self):
+        super().__post_init__()
+        self.scene.num_envs = 50
+        self.observations.policy.enable_corruption = True
+        self.commands.jump_goal.debug_vis = True
 
 
 @configclass

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 
 import torch
@@ -24,9 +25,22 @@ from .motion import (
 )
 
 
-def reference_motion_complete(env) -> torch.Tensor:
-    """Terminates when the reference motion has been exhausted for that env."""
-    return get_env_time(env) >= REFERENCE_DURATION_S
+def reference_motion_complete(env, hold_duration_s: float = 0.0) -> torch.Tensor:
+    """Terminate after the reference motion and an optional final-pose hold.
+
+    Args:
+        env: Environment from which to read the reference clock.
+        hold_duration_s: Additional duration at the final reference pose [s].
+
+    Returns:
+        Boolean timeout mask for all environments.
+
+    Raises:
+        ValueError: If :paramref:`hold_duration_s` is negative or non-finite.
+    """
+    if not math.isfinite(hold_duration_s) or hold_duration_s < 0.0:
+        raise ValueError(f"hold_duration_s must be finite and non-negative, got {hold_duration_s}.")
+    return get_env_time(env) >= REFERENCE_DURATION_S + hold_duration_s
 
 
 def ground_contact(env, threshold: float, sensor_names: Sequence[str]) -> torch.Tensor:
