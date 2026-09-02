@@ -102,6 +102,7 @@ _GANTRY_REHEARSAL_MAX_EFFORT_SCALE = 0.1
 _GROUND_JUMP_MIN_DURATION_S = 20.0
 _GROUND_JUMP_MAX_DURATION_S = 60.0
 _GROUND_JUMP_MAX_EFFORT_SCALE = 0.6
+_NATIVE_DWELL_MIN_DURATION_S = 1.0
 _GROUND_STAND_STIFFNESS = 200.0
 _GROUND_STAND_DAMPING = 5.0
 _GROUND_STAND_ANKLE_STIFFNESS = 80.0
@@ -588,6 +589,9 @@ class _GroundJumpRecorder(_RehearsalRecorder):
         settle_timeout_s: float,
         settle_joint_velocity_tolerance_rad_s: float,
         joint_limit_abort_margin_rad: float,
+        *,
+        handback_between_goals: bool = False,
+        native_dwell_s: float | None = None,
     ):
         super().__init__(
             log_path,
@@ -606,6 +610,11 @@ class _GroundJumpRecorder(_RehearsalRecorder):
         self._previous_fsm_state: JumpControllerState | None = None
         self._maximum_joint_speed_fractions: list[float] = []
         self._body_tilts_rad: list[float] = []
+        self._estimated_torque_fractions: list[float] = []
+        self._handback_between_goals = handback_between_goals
+        self._native_dwell_s = native_dwell_s
+        self._cycle_records: list[dict[str, Any]] = []
+        self._active_cycle: dict[str, Any] | None = None
         self._stand_gains = stand_gains
         self._balance_config = balance_config
         self._stand_entry_duration_s = stand_entry_duration_s
@@ -626,6 +635,10 @@ class _GroundJumpRecorder(_RehearsalRecorder):
             float(np.max(np.abs(command.feedback.joint_velocities) / self._manifest.velocity_limit))
         )
         self._body_tilts_rad.append(_body_tilt(command.feedback.imu_quaternion))
+        estimated_torque = command.stiffness * (command.target - command.feedback.joint_positions) - (
+            command.damping * command.feedback.joint_velocities
+        )
+        self._estimated_torque_fractions.append(float(np.max(np.abs(estimated_torque) / self._manifest.effort_limit)))
         if state is JumpControllerState.JUMP and self._previous_fsm_state is not JumpControllerState.JUMP:
             goal = fsm.latched_goal
             self._active_jump = {
@@ -675,6 +688,66 @@ class _GroundJumpRecorder(_RehearsalRecorder):
                 self._finish_jump(fsm)
         self._previous_fsm_state = state
 
+    def start_cycle(self, cycle_index: int, goal: JumpGoal) -> None:
+        """Start one native-stand hand-back cycle summary."""
+        if self._active_cycle is not None:
+            raise RuntimeError("cannot start a ground-jump cycle while another cycle is active")
+        self._active_cycle = {
+            "index": cycle_index,
+            "goal": {
+                "pos_x": goal.dx,
+                "pos_y": goal.dy,
+                "yaw": goal.dyaw,
+                "roll": goal.roll,
+                "pitch": goal.pitch,
+            },
+            "sample_start": self.sample_count,
+            "jump_record_start": len(self._jump_records),
+        }
+
+    def finish_cycle(
+        self,
+        *,
+        success: bool,
+        reason: str,
+        native_handback_outcome: str,
+        native_fsm_id: int | None,
+    ) -> None:
+        """Finish the active native-stand hand-back cycle summary."""
+        if self._active_cycle is None:
+            raise RuntimeError("cannot finish a ground-jump cycle before it starts")
+        sample_start = int(self._active_cycle.pop("sample_start"))
+        jump_record_start = int(self._active_cycle.pop("jump_record_start"))
+        sample_end = self.sample_count
+        cycle_states = self._fsm_states[sample_start:sample_end]
+        cycle_steps = self._episode_steps[sample_start:sample_end]
+        landing_steps = [
+            step
+            for state, step in zip(cycle_states, cycle_steps, strict=True)
+            if state == JumpControllerState.SETTLE.value
+        ]
+        jump_record = self._jump_records[-1] if len(self._jump_records) > jump_record_start else None
+        abort_reason = None if jump_record is None else jump_record.get("latched_abort_reason")
+        if not success and abort_reason is None:
+            abort_reason = reason
+        cycle_tilts = self._body_tilts_rad[sample_start:sample_end]
+        cycle_torque_fractions = self._estimated_torque_fractions[sample_start:sample_end]
+        self._active_cycle.update(
+            {
+                "outcome": "completed" if success else "stopped",
+                "landing_step_range": None if not landing_steps else [min(landing_steps), max(landing_steps)],
+                "abort_reason": abort_reason,
+                "peak_tilt_rad": max(cycle_tilts, default=0.0),
+                "peak_torque_fraction": max(cycle_torque_fractions, default=0.0),
+                "native_handback": {
+                    "outcome": native_handback_outcome,
+                    "fsm_id": native_fsm_id,
+                },
+            }
+        )
+        self._cycle_records.append(self._active_cycle)
+        self._active_cycle = None
+
     def _finish_jump(self, fsm: JumpControllerFSM) -> None:
         if self._active_jump is None:
             return
@@ -693,6 +766,10 @@ class _GroundJumpRecorder(_RehearsalRecorder):
             self._jump_records.append(self._active_jump)
             self._active_jump = None
         metadata["jumps"] = self._jump_records
+        if self._handback_between_goals:
+            metadata["handback_between_goals"] = True
+            metadata["native_dwell_s"] = self._native_dwell_s
+            metadata["cycles"] = self._cycle_records
         metadata["target_rate_limit_rad_s"] = {
             "stand": _TARGET_RATE_LIMIT_RAD_S,
             "goto_start": _TARGET_RATE_LIMIT_RAD_S,
@@ -2270,6 +2347,8 @@ def _validate_ground_jump_args(parser: argparse.ArgumentParser, args: argparse.N
             parser.error("--goal_sequence requires --ground_jump")
         if args.interactive_goals:
             parser.error("--interactive_goals requires --ground_jump")
+        if args.handback_between_goals:
+            parser.error("--handback_between_goals requires --ground_jump")
         return
     if not args.enable_control:
         parser.error("--ground_jump requires --enable_control")
@@ -2299,6 +2378,10 @@ def _validate_ground_jump_args(parser: argparse.ArgumentParser, args: argparse.N
         parser.error("--ground_jump requires --exit_mode passive or native_walkrun")
     if args.exit_mode == "native_walkrun" and args.entry_mode != "native_stand":
         parser.error("--ground_jump --exit_mode native_walkrun requires --entry_mode native_stand")
+    if args.handback_between_goals and (args.entry_mode != "native_stand" or args.exit_mode != "native_walkrun"):
+        parser.error(
+            "--handback_between_goals requires --ground_jump --entry_mode native_stand --exit_mode native_walkrun"
+        )
     if args.goal_sequence is None and not args.interactive_goals:
         parser.error("--ground_jump requires --goal_sequence and/or --interactive_goals")
     try:
@@ -2432,6 +2515,17 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         action="store_true",
         help="Read each additional ground-jump longitudinal goal from stdin without blocking control.",
     )
+    parser.add_argument(
+        "--handback_between_goals",
+        action="store_true",
+        help=("Run one ground goal per user-control session, restoring and dwelling in native stand between goals."),
+    )
+    parser.add_argument(
+        "--native_dwell_s",
+        type=float,
+        default=3.0,
+        help="Native-stand dwell between hand-back ground-jump cycles [s]; must be at least 1.0.",
+    )
     parser.add_argument("--goal_pos_x", type=float, default=0.0, help="Read-only policy goal x displacement [m].")
     parser.add_argument("--goal_pos_y", type=float, default=0.0, help="Read-only policy goal y displacement [m].")
     parser.add_argument("--goal_yaw", type=float, default=0.0, help="Read-only policy goal yaw displacement [rad].")
@@ -2443,7 +2537,15 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         default=_DEFAULT_AUDIO_CUE,
         help="16-bit, 16 kHz, mono PCM WAV played after remote activation.",
     )
-    parser.add_argument("--duration", type=float, default=10.0, help="Maximum user-control duration in seconds.")
+    parser.add_argument(
+        "--duration",
+        type=float,
+        default=10.0,
+        help=(
+            "Maximum user-control duration [s]; with --handback_between_goals this is per cycle and total "
+            "session time is roughly goal_count * (duration + native_dwell_s)."
+        ),
+    )
     parser.add_argument(
         "--effort_scale",
         type=float,
@@ -2479,6 +2581,8 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     maximum_duration_s = _GROUND_JUMP_MAX_DURATION_S if args.ground_jump else 30.0
     if not math.isfinite(args.duration) or not 1.0 <= args.duration <= maximum_duration_s:
         parser.error(f"--duration must be finite and in [1, {maximum_duration_s:g}] seconds")
+    if not math.isfinite(args.native_dwell_s) or args.native_dwell_s < _NATIVE_DWELL_MIN_DURATION_S:
+        parser.error(f"--native_dwell_s must be finite and at least {_NATIVE_DWELL_MIN_DURATION_S:.1f} seconds")
     if args.effort_scale is None:
         if args.ground_jump:
             parser.error("--ground_jump requires explicit --effort_scale")
@@ -3509,6 +3613,270 @@ def _run_control(  # noqa: C901
     return success, reason
 
 
+def _native_stand_snapshot(
+    state_buffer: _StateBuffer,
+    loco_client: Any,
+    manifest: HardwareManifest,
+) -> tuple[FeedbackSnapshot, int]:
+    """Return healthy feedback while the native controller reports a stand ID."""
+    snapshot = state_buffer.snapshot()
+    if snapshot is None:
+        raise SafetyFault("G1 feedback disappeared under native stand control")
+    feedback_fault = _feedback_fault(snapshot, manifest, time.monotonic())
+    if feedback_fault is not None:
+        raise SafetyFault(f"native stand feedback refused: {feedback_fault}")
+    if state_buffer.crc_errors or state_buffer.invalid_packets:
+        raise SafetyFault(
+            f"native stand feedback integrity error (CRC={state_buffer.crc_errors}, "
+            f"invalid={state_buffer.invalid_packets})"
+        )
+    if _remote_b_pressed(snapshot.wireless_remote):
+        raise SafetyFault("operator pressed B under native stand control")
+    try:
+        fsm_code, fsm_id = loco_client.GetFsmId()
+    except Exception as exc:
+        raise SafetyFault(f"native stand FSM query failed: {type(exc).__name__}: {exc}") from exc
+    if fsm_code != 0 or fsm_id not in _NATIVE_STAND_FSM_IDS:
+        raise SafetyFault(f"native controller left a verified stand mode (code={fsm_code}, FSM ID={fsm_id})")
+    return snapshot, fsm_id
+
+
+def _dwell_in_native_stand(
+    state_buffer: _StateBuffer,
+    loco_client: Any,
+    manifest: HardwareManifest,
+    duration_s: float,
+) -> None:
+    """Hold under native control while continuously checking feedback and FSM state."""
+    started_at = time.monotonic()
+    while time.monotonic() - started_at < duration_s:
+        _native_stand_snapshot(state_buffer, loco_client, manifest)
+        time.sleep(0.01)
+
+
+def _read_native_stand_goal(
+    reader: _InteractiveGoalReader,
+    state_buffer: _StateBuffer,
+    loco_client: Any,
+    manifest: HardwareManifest,
+    goal_pos_x_range: tuple[float, float],
+    minimum_dwell_s: float,
+) -> JumpGoal | None:
+    """Read an interactive goal while native stand retains ownership."""
+    started_at = time.monotonic()
+    reader.request("NEXT GOAL under native control, dx [m] (or q):")
+    while True:
+        _native_stand_snapshot(state_buffer, loco_client, manifest)
+        response = reader.poll()
+        if response is not None:
+            if response.lower() == "q":
+                return None
+            try:
+                goal = _parse_ground_goal(response, goal_pos_x_range)
+            except ValueError as exc:
+                print(f"GOAL REJECTED: {exc}")
+                reader.request("NEXT GOAL under native control, dx [m] (or q):")
+            else:
+                remaining_dwell_s = minimum_dwell_s - (time.monotonic() - started_at)
+                if remaining_dwell_s > 0.0:
+                    _dwell_in_native_stand(state_buffer, loco_client, manifest, remaining_dwell_s)
+                return goal
+        elif reader.eof:
+            return None
+        time.sleep(0.01)
+
+
+def _new_ground_jump_fsm(
+    manifest_path: Path,
+    robot: _G1Robot,
+    operator: _GantryRehearsalOperator,
+    policy: OnnxPolicy,
+    stand_gains: StandGainConfig,
+    balance_config: BalanceControllerConfig,
+) -> JumpControllerFSM:
+    """Create one fresh FSM with the verified ground-jump settings."""
+    return JumpControllerFSM(
+        manifest_path,
+        robot,
+        operator,
+        policy,
+        stand_gains=stand_gains,
+        config=JumpControllerConfig(
+            stand_entry_duration_s=_GROUND_STAND_ENTRY_DURATION_S,
+            stand_balance_target_entry_duration_s=_GROUND_STAND_ENTRY_DURATION_S,
+            stand_hold_measured_pose=False,
+            armed_timeout_s=_REHEARSAL_ARMED_TIMEOUT_S,
+            contact_safety_mode=JumpControllerConfig.ContactSafetyMode.UNMEASURED_GROUND,
+            latched_abort_upright_settle=True,
+            policy_stand_after_jump=True,
+            settle_duration_s=_GROUND_SETTLE_DURATION_S,
+            settle_timeout_s=_GROUND_SETTLE_TIMEOUT_S,
+            settle_joint_velocity_tolerance_rad_s=_GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S,
+            joint_limit_abort_margin_rad=_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD,
+        ),
+        balance_config=balance_config,
+    )
+
+
+def _run_ground_jump_cycles(  # noqa: C901
+    manifest_path: Path,
+    manifest: HardwareManifest,
+    robot: _G1Robot,
+    state_buffer: _StateBuffer,
+    loco_client: Any,
+    internal_passive_mode: Any,
+    internal_walkrun_mode: Any,
+    policy: OnnxPolicy,
+    stand_gains: StandGainConfig,
+    balance_config: BalanceControllerConfig,
+    goals: tuple[JumpGoal, ...],
+    interactive_goals: bool,
+    goal_pos_x_range: tuple[float, float],
+    duration_s: float,
+    native_dwell_s: float,
+    effort_scale: float,
+    recorder: _GroundJumpRecorder,
+) -> tuple[bool, str]:
+    """Run one complete native hand-back cycle for each requested ground goal."""
+    remaining_goals = list(goals)
+    interactive_reader = _InteractiveGoalReader() if interactive_goals else None
+    cycle_index = 0
+    completed_cycles = 0
+    next_cycle_requires_dwell = False
+    reason = ""
+    try:
+        while True:
+            if remaining_goals:
+                goal = remaining_goals.pop(0)
+                if next_cycle_requires_dwell:
+                    _dwell_in_native_stand(state_buffer, loco_client, manifest, native_dwell_s)
+            elif interactive_reader is not None:
+                goal = _read_native_stand_goal(
+                    interactive_reader,
+                    state_buffer,
+                    loco_client,
+                    manifest,
+                    goal_pos_x_range,
+                    native_dwell_s if next_cycle_requires_dwell else 0.0,
+                )
+                if goal is None:
+                    reason = f"completed ground hand-back cycles ({completed_cycles} jumps)"
+                    break
+            else:
+                reason = f"completed configured ground hand-back cycles ({completed_cycles} jumps)"
+                break
+
+            if completed_cycles:
+                print(
+                    f"READY: cycle {completed_cycles} complete; robot is under native control. "
+                    f"Next goal dx={goal.dx:+.2f}; tap A to arm."
+                )
+            cycle_index += 1
+            cycle_count = "?" if interactive_goals else str(len(goals))
+            print(f"GROUND JUMP CYCLE {cycle_index}/{cycle_count}: goal dx={goal.dx:+.2f} m")
+            snapshot, native_fsm_id = _native_stand_snapshot(state_buffer, loco_client, manifest)
+            native_handoff_position = snapshot.joint_positions.copy()
+            default_error = np.abs(native_handoff_position - manifest.default_position)
+            default_worst_index = int(np.argmax(default_error))
+            print(
+                "NATIVE POSE CAPTURE: captured native stand for successful WALKRUN handback; "
+                f"maximum manifest-default offset={default_error[default_worst_index]:.3f} rad "
+                f"({manifest.joint_names[default_worst_index]})."
+            )
+            operator = _GantryRehearsalOperator(goal)
+            operator.set_goal(None)
+            fsm = _new_ground_jump_fsm(
+                manifest_path,
+                robot,
+                operator,
+                policy,
+                stand_gains,
+                balance_config,
+            )
+            recorder.start_cycle(cycle_index, goal)
+            _bridge_native_stand_to_passive(
+                loco_client,
+                robot,
+                state_buffer,
+                manifest,
+                native_fsm_id,
+            )
+            success, reason = _run_control(
+                robot,
+                operator,
+                fsm,
+                state_buffer,
+                loco_client,
+                internal_passive_mode,
+                duration_s,
+                effort_scale,
+                success_internal_mode=internal_walkrun_mode,
+                success_internal_fsm_id=_NATIVE_WALKRUN_FSM_ID,
+                success_handoff_position=native_handoff_position,
+                ground_jump=True,
+                ground_goals=(goal,),
+                ground_goal_pos_x_range=goal_pos_x_range,
+                ground_recorder=recorder,
+            )
+            fsm_code, reported_fsm_id = loco_client.GetFsmId()
+            handback_completed = success and fsm_code == 0 and reported_fsm_id in _NATIVE_STAND_FSM_IDS
+            recorder.finish_cycle(
+                success=success,
+                reason=reason,
+                native_handback_outcome="completed" if handback_completed else "failed",
+                native_fsm_id=reported_fsm_id if fsm_code == 0 else None,
+            )
+            print(
+                f"GROUND JUMP CYCLE {cycle_index} HAND-BACK: "
+                f"{'PASS' if handback_completed else 'STOP'} (FSM ID "
+                f"{reported_fsm_id if fsm_code == 0 else 'unknown'})."
+            )
+            if not handback_completed:
+                if success:
+                    reason = (
+                        "native hand-back verification changed after monitoring "
+                        f"(code={fsm_code}, FSM ID={reported_fsm_id})"
+                    )
+                _restore_internal_control(
+                    robot,
+                    loco_client,
+                    internal_passive_mode,
+                    expected_fsm_id=_PASSIVE_FSM_ID,
+                    request_fsm_id=_PASSIVE_FSM_ID,
+                )
+                return False, reason
+            completed_cycles += 1
+            next_cycle_requires_dwell = True
+    except KeyboardInterrupt:
+        reason = "operator pressed Ctrl+C under native stand control"
+    except SafetyFault as exc:
+        reason = str(exc)
+    except Exception as exc:
+        reason = f"unexpected {type(exc).__name__}: {exc}"
+    else:
+        return True, reason
+
+    restored, return_code, reported_fsm_id = _restore_internal_control(
+        robot,
+        loco_client,
+        internal_passive_mode,
+        expected_fsm_id=_PASSIVE_FSM_ID,
+        request_fsm_id=_PASSIVE_FSM_ID,
+    )
+    if recorder._active_cycle is not None:
+        recorder.finish_cycle(
+            success=False,
+            reason=reason,
+            native_handback_outcome="failed",
+            native_fsm_id=reported_fsm_id,
+        )
+    if restored:
+        print("Native PASSIVE/damping control restored.")
+    else:
+        reason += f"; CRITICAL: could not restore native PASSIVE (last code={return_code})"
+    return False, reason
+
+
 def main() -> int:  # noqa: C901
     """Run read-only checks, stand control, or the guarded gantry rehearsal."""
     args = _parse_args()
@@ -3573,6 +3941,8 @@ def main() -> int:  # noqa: C901
             _GROUND_SETTLE_TIMEOUT_S,
             _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S,
             _GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD,
+            handback_between_goals=args.handback_between_goals,
+            native_dwell_s=args.native_dwell_s if args.handback_between_goals else None,
         )
         rehearsal_policy = OnnxPolicy(policy_path, _OBSERVATION_DIM, manifest.joint_count)
         rehearsal_policy.warm_up()
@@ -3818,7 +4188,9 @@ def main() -> int:  # noqa: C901
         if pose_fault is not None:
             raise SafetyFault(pose_fault)
         native_handoff_position = (
-            calibration_snapshot.joint_positions.copy() if args.exit_mode == "native_walkrun" else None
+            calibration_snapshot.joint_positions.copy()
+            if args.exit_mode == "native_walkrun" and not args.handback_between_goals
+            else None
         )
         if args.ground_jump:
             if ground_stand_gains is None or ground_balance_config is None:
@@ -3913,31 +4285,64 @@ def main() -> int:  # noqa: C901
             ),
             balance_config=balance_config,
         )
-        if args.entry_mode in ("native_stand", "native_walkrun_gantry"):
-            _bridge_native_stand_to_passive(loco_client, robot, state_buffer, manifest, fsm_id)
-        success, reason = _run_control(
-            robot,
-            operator,
-            fsm,
-            state_buffer,
-            loco_client,
-            InternalFsmMode.PASSIVE,
-            args.duration,
-            args.effort_scale,
-            success_internal_mode=(InternalFsmMode.WALKRUN if args.exit_mode == "native_walkrun" else None),
-            success_internal_fsm_id=(_NATIVE_WALKRUN_FSM_ID if args.exit_mode == "native_walkrun" else None),
-            success_handoff_position=native_handoff_position,
-            recalibrate_balance_after_user_switch=args.entry_mode == "native_walkrun_gantry",
-            gantry_policy_rehearsal=args.gantry_policy_rehearsal,
-            rehearsal_recorder=rehearsal_recorder,
-            ground_jump=args.ground_jump,
-            ground_goals=args.ground_goals,
-            interactive_goal_reader=(_InteractiveGoalReader() if args.interactive_goals else None),
-            ground_goal_pos_x_range=args.ground_goal_pos_x_range,
-            ground_recorder=ground_recorder,
-            rehearsal_escalated=args.rehearsal_escalated,
-            rehearsal_unlimited_slew=args.rehearsal_unlimited_slew,
-        )
+        if args.handback_between_goals:
+            if (
+                ground_recorder is None
+                or rehearsal_policy is None
+                or ground_stand_gains is None
+                or ground_balance_config is None
+                or args.ground_goal_pos_x_range is None
+            ):
+                raise RuntimeError("ground hand-back cycle configuration was not initialized")
+            print(
+                f"GROUND HAND-BACK PLAN: {len(args.ground_goals)} configured goal(s), "
+                f"{args.duration:.1f} s user-control budget per cycle, {args.native_dwell_s:.1f} s native dwell."
+            )
+            success, reason = _run_ground_jump_cycles(
+                manifest_path,
+                manifest,
+                robot,
+                state_buffer,
+                loco_client,
+                InternalFsmMode.PASSIVE,
+                InternalFsmMode.WALKRUN,
+                rehearsal_policy,
+                ground_stand_gains,
+                ground_balance_config,
+                args.ground_goals,
+                args.interactive_goals,
+                args.ground_goal_pos_x_range,
+                args.duration,
+                args.native_dwell_s,
+                args.effort_scale,
+                ground_recorder,
+            )
+        else:
+            if args.entry_mode in ("native_stand", "native_walkrun_gantry"):
+                _bridge_native_stand_to_passive(loco_client, robot, state_buffer, manifest, fsm_id)
+            success, reason = _run_control(
+                robot,
+                operator,
+                fsm,
+                state_buffer,
+                loco_client,
+                InternalFsmMode.PASSIVE,
+                args.duration,
+                args.effort_scale,
+                success_internal_mode=(InternalFsmMode.WALKRUN if args.exit_mode == "native_walkrun" else None),
+                success_internal_fsm_id=(_NATIVE_WALKRUN_FSM_ID if args.exit_mode == "native_walkrun" else None),
+                success_handoff_position=native_handoff_position,
+                recalibrate_balance_after_user_switch=args.entry_mode == "native_walkrun_gantry",
+                gantry_policy_rehearsal=args.gantry_policy_rehearsal,
+                rehearsal_recorder=rehearsal_recorder,
+                ground_jump=args.ground_jump,
+                ground_goals=args.ground_goals,
+                interactive_goal_reader=(_InteractiveGoalReader() if args.interactive_goals else None),
+                ground_goal_pos_x_range=args.ground_goal_pos_x_range,
+                ground_recorder=ground_recorder,
+                rehearsal_escalated=args.rehearsal_escalated,
+                rehearsal_unlimited_slew=args.rehearsal_unlimited_slew,
+            )
         if rehearsal_recorder is not None:
             try:
                 rehearsal_recorder.write(success, reason, state_buffer)

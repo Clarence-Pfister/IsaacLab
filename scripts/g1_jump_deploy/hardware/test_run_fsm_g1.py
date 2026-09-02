@@ -691,6 +691,55 @@ def test_ground_jump_native_walkrun_exit_requires_native_stand(monkeypatch, tmp_
         _parse_args()
 
 
+@pytest.mark.parametrize(
+    "arguments_update",
+    [
+        ["--handback_between_goals"],
+        ["--handback_between_goals", "--exit_mode", "passive"],
+        ["--handback_between_goals", "--entry_mode", "passive", "--exit_mode", "native_walkrun"],
+    ],
+)
+def test_handback_between_goals_fails_closed(monkeypatch, tmp_path: Path, arguments_update: list[str]) -> None:
+    if arguments_update == ["--handback_between_goals"]:
+        arguments = ["run_fsm_g1.py", "enp131s0", *arguments_update]
+    else:
+        arguments = _ground_jump_arguments(tmp_path)
+        for option in ("--entry_mode", "--exit_mode"):
+            if option in arguments_update:
+                index = arguments.index(option)
+                replacement_index = arguments_update.index(option)
+                arguments[index + 1] = arguments_update[replacement_index + 1]
+        arguments.append("--handback_between_goals")
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize("native_dwell_s", ["0.999", "nan", "inf"])
+def test_native_dwell_requires_finite_minimum(monkeypatch, tmp_path: Path, native_dwell_s: str) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    arguments[arguments.index("--exit_mode") + 1] = "native_walkrun"
+    arguments.extend(("--handback_between_goals", "--native_dwell_s", native_dwell_s))
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_handback_between_goals_cli_uses_per_cycle_defaults(monkeypatch, tmp_path: Path) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    arguments[arguments.index("--exit_mode") + 1] = "native_walkrun"
+    arguments.append("--handback_between_goals")
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    args = _parse_args()
+
+    assert args.handback_between_goals is True
+    assert args.native_dwell_s == pytest.approx(3.0)
+    assert args.duration == pytest.approx(20.0)
+
+
 def test_interactive_goal_reader_never_blocks_control_thread() -> None:
     release_read = threading.Event()
 
@@ -1587,6 +1636,66 @@ def test_ground_recorder_writes_authorization_and_per_jump_outcome(monkeypatch, 
             "max_tilt_rad": 0.0,
             "max_estimated_torque_fraction": 0.0,
             "joint_limit_touches_rad": {"left_knee_joint": 0.0003},
+        }
+    ]
+    assert "cycles" not in metadata
+
+    cycle_recorder = _GroundJumpRecorder(
+        tmp_path / "ground_cycles.npz",
+        manifest_path,
+        policy_path,
+        admission_path,
+        manifest,
+        0.3,
+        stand_gains,
+        balance_config,
+        1.0,
+        True,
+        0.5,
+        4.0,
+        0.05,
+        0.02,
+        handback_between_goals=True,
+        native_dwell_s=3.0,
+    )
+    state_buffer._snapshot_value = replace(state_buffer.snapshot(), received_at=clock.current)
+    goal = JumpGoal(-0.1, 0.0, 0.0)
+    cycle_recorder.start_cycle(1, goal)
+    fsm.latched_goal = goal
+    fsm.abort_latched = False
+    fsm.latched_abort_reason = None
+    fsm.latched_abort_reasons = set()
+    for state, step in (
+        (JumpControllerState.JUMP, 1),
+        (JumpControllerState.SETTLE, 152),
+        (JumpControllerState.STAND, 152),
+    ):
+        fsm.state = state
+        fsm.episode_step = step
+        robot.publish(np.zeros(23), effort_scale=0.3)
+        cycle_recorder.record(robot, fsm, np.zeros(23))
+    cycle_recorder.finish_cycle(
+        success=True,
+        reason="completed configured ground goal sequence (1 jumps)",
+        native_handback_outcome="completed",
+        native_fsm_id=801,
+    )
+    cycle_recorder.write(True, "completed ground hand-back cycles", state_buffer)
+
+    with np.load(cycle_recorder.log_path, allow_pickle=False) as log:
+        cycle_metadata = json.loads(log["metadata_json"].item())
+    assert cycle_metadata["handback_between_goals"] is True
+    assert cycle_metadata["native_dwell_s"] == pytest.approx(3.0)
+    assert cycle_metadata["cycles"] == [
+        {
+            "index": 1,
+            "goal": {"pitch": 0.0, "pos_x": -0.1, "pos_y": 0.0, "roll": 0.0, "yaw": 0.0},
+            "outcome": "completed",
+            "landing_step_range": [152, 152],
+            "abort_reason": None,
+            "peak_tilt_rad": 0.0,
+            "peak_torque_fraction": 0.0,
+            "native_handback": {"outcome": "completed", "fsm_id": 801},
         }
     ]
 
