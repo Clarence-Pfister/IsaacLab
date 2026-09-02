@@ -24,6 +24,7 @@ from scripts.g1_jump_deploy.fsm.run_fsm_mujoco import (
     _load_initial_state,
     _parse_args,
     _prejump_hold_upright_result,
+    _rehearsal_target_rate_limit,
     _repeat_goals,
     _scenario_result,
     _scenario_timeline,
@@ -435,6 +436,15 @@ def test_contactless_gantry_rehearsal_escalation_is_fail_closed(monkeypatch) -> 
 
     assert args.effort_scale == pytest.approx(0.3)
     assert args.target_rate_limit_rad_s is None
+
+
+def test_escalated_rehearsal_unlimited_slew_covers_jump_and_settle_only() -> None:
+    assert _rehearsal_target_rate_limit(JumpControllerState.JUMP, unlimited_slew=True) is None
+    assert _rehearsal_target_rate_limit(JumpControllerState.SETTLE, unlimited_slew=True) is None
+    assert _rehearsal_target_rate_limit(
+        JumpControllerState.STAND,
+        unlimited_slew=True,
+    ) == pytest.approx(1.2)
 
 
 @pytest.mark.parametrize("override", ["0.1", "0.61", "nan"])

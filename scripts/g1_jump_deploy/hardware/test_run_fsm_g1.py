@@ -983,7 +983,7 @@ def test_feedback_accepts_measurement_outside_narrower_target_clip() -> None:
     assert _feedback_fault(snapshot, _manifest(), now) is None
 
 
-def test_ground_dynamic_feedback_limits_allow_jump_envelope_only() -> None:
+def test_dynamic_feedback_limits_cover_ground_and_escalated_rehearsal_states() -> None:
     now = 100.0
     manifest = _manifest()
     snapshot = _snapshot(now)
@@ -1035,8 +1035,16 @@ def test_ground_dynamic_feedback_limits_allow_jump_envelope_only() -> None:
     )
     assert rehearsal_limits.joint_position_margin_rad == pytest.approx(ground_limits.joint_position_margin_rad)
     np.testing.assert_array_equal(rehearsal_limits.joint_speed_limit_rad_s, ground_limits.joint_speed_limit_rad_s)
+    rehearsal_settle_limits = _active_feedback_limits(
+        manifest, JumpControllerState.SETTLE, ground_jump=False, rehearsal_escalated=True
+    )
+    np.testing.assert_array_equal(
+        rehearsal_settle_limits.joint_speed_limit_rad_s,
+        ground_limits.joint_speed_limit_rad_s,
+    )
+    assert rehearsal_settle_limits.body_tilt_limit_rad == pytest.approx(ground_limits.body_tilt_limit_rad)
     assert (
-        _active_feedback_limits(manifest, JumpControllerState.SETTLE, ground_jump=False, rehearsal_escalated=True)
+        _active_feedback_limits(manifest, JumpControllerState.STAND, ground_jump=False, rehearsal_escalated=True)
         == FeedbackLimits()
     )
     assert _active_target_rate_limit(JumpControllerState.JUMP, ground_jump=False, rehearsal_unlimited_slew=True) is None

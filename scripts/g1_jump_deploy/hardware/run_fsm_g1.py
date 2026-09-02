@@ -2892,7 +2892,10 @@ def _active_feedback_limits(
 ) -> FeedbackLimits:
     """Select the feedback envelope without changing normal control modes."""
     ground_dynamic = ground_jump and state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
-    rehearsal_dynamic = rehearsal_escalated and state is JumpControllerState.JUMP
+    rehearsal_dynamic = rehearsal_escalated and state in (
+        JumpControllerState.JUMP,
+        JumpControllerState.SETTLE,
+    )
     return _ground_dynamic_feedback_limits(manifest) if ground_dynamic or rehearsal_dynamic else FeedbackLimits()
 
 
@@ -3620,7 +3623,7 @@ def main() -> int:  # noqa: C901
             if args.rehearsal_escalated:
                 print(
                     f"ESCALATED REHEARSAL: effort_scale={args.effort_scale:.2f}, "
-                    f"unlimited_slew={args.rehearsal_unlimited_slew}; dynamic JUMP feedback envelope enabled."
+                    f"unlimited_slew={args.rehearsal_unlimited_slew}; dynamic JUMP/SETTLE feedback envelope enabled."
                 )
         elif args.ground_jump:
             print(

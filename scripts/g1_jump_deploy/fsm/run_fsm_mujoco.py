@@ -884,6 +884,18 @@ def _validate_contactless_gantry_rehearsal_args(
         parser.error("--contactless_gantry_rehearsal requires all five explicit goals to be zero.")
 
 
+def _rehearsal_target_rate_limit(
+    state: JumpControllerState,
+    *,
+    unlimited_slew: bool,
+) -> float | None:
+    """Return the contactless-rehearsal slew limit for one FSM state."""
+
+    if unlimited_slew and state in (JumpControllerState.JUMP, JumpControllerState.SETTLE):
+        return None
+    return _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S
+
+
 def _validate_unmeasured_ground_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     """Restrict the blind-contact runner to a ground jump-path validation."""
     if not args.unmeasured_ground_validation:
@@ -1666,10 +1678,9 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
                 )
 
             if args.rehearsal_unlimited_slew:
-                target_rate_limit = (
-                    None
-                    if fsm.state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
-                    else _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S
+                target_rate_limit = _rehearsal_target_rate_limit(
+                    fsm.state,
+                    unlimited_slew=True,
                 )
                 robot.set_target_rate_limit(target_rate_limit)
             balance_offset = fsm.update_balance(robot.sim_dt)
