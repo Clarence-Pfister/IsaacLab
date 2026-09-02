@@ -33,6 +33,7 @@ from runtime import (  # noqa: E402
     JumpGoalRuntime,
     project_pd_position_target,
     project_position_target_to_lower_limit,
+    saturate_torque_at_velocity_limit,
 )
 
 _REPO_ROOT = _SCRIPT_DIR.parents[2]
@@ -903,6 +904,32 @@ def _load_action_sequence(path: Path, manifest: DeploymentManifest) -> np.ndarra
     return sequence
 
 
+def _compute_actuator_control(
+    target: np.ndarray,
+    position: np.ndarray,
+    velocity: np.ndarray,
+    stiffness: np.ndarray,
+    damping: np.ndarray,
+    effort_limit: np.ndarray,
+    velocity_limit: np.ndarray,
+    *,
+    use_implicit_pd: bool,
+    emulate_velocity_limit: bool,
+) -> np.ndarray:
+    """Compute position- or torque-actuator control with optional speed saturation."""
+    if use_implicit_pd and not emulate_velocity_limit:
+        return target
+    torque = stiffness * (target - position) - damping * velocity
+    torque = np.clip(torque, -effort_limit, effort_limit)
+    if emulate_velocity_limit:
+        torque = saturate_torque_at_velocity_limit(torque, velocity, velocity_limit)
+    if not use_implicit_pd:
+        return torque
+    if np.any(stiffness <= 0.0):
+        raise ValueError("Implicit-PD velocity-limit emulation requires strictly positive stiffness.")
+    return position + (torque + damping * velocity) / stiffness
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=_DEFAULT_MANIFEST)
@@ -926,6 +953,11 @@ def _parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--emulate_velocity_limit",
+        action="store_true",
+        help="Emulate manifest actuator velocity limits with torque-speed saturation.",
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--self-check", "--self_check", dest="self_check", action="store_true")
     mode.add_argument("--cross-check", "--cross_check", dest="cross_check", action="store_true")
@@ -991,6 +1023,8 @@ def _parse_args() -> argparse.Namespace:
     args = parser.parse_args()
     if args.action_sequence is not None and not args.cross_check:
         parser.error("--action_sequence requires --cross-check.")
+    if args.emulate_velocity_limit and args.clamp_joint_velocity:
+        parser.error("--emulate_velocity_limit cannot be combined with diagnostic --clamp_joint_velocity.")
     return args
 
 
@@ -1216,6 +1250,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 - one validated simulat
         "policy_dt": manifest.policy_dt,
         "decimation": manifest.decimation,
         "delay_steps": delay_steps,
+        "emulate_velocity_limit": args.emulate_velocity_limit,
         "joint_velocity_clamped": bool(args.clamp_joint_velocity),
         "contact_compliance": contact_compliance,
         "seed": 0 if args.cross_check else args.seed,
@@ -1249,10 +1284,10 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 - one validated simulat
     q_target = measured_pos.copy()
     observation = np.zeros(manifest.observation_dim, dtype=np.float32)
     phase = 0
-    if not parity_config.use_implicit_pd:
-        stiffness_actuator = manifest.stiffness[interface.actuator_from_policy]
-        damping_actuator = manifest.damping[interface.actuator_from_policy]
-        effort_limit_actuator = manifest.effort_limit[interface.actuator_from_policy]
+    stiffness_actuator = manifest.stiffness[interface.actuator_from_policy]
+    damping_actuator = manifest.damping[interface.actuator_from_policy]
+    effort_limit_actuator = manifest.effort_limit[interface.actuator_from_policy]
+    velocity_limit_actuator = manifest.velocity_limit[interface.actuator_from_policy]
 
     def process_policy_tick(policy_step: int) -> None:
         nonlocal delayed_action, observation, phase, q_target, raw_action
@@ -1363,14 +1398,19 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 - one validated simulat
                     manifest.effort_limit_ratio,
                 )
             q_target_actuator = applied_q_target[interface.actuator_from_policy]
-            if parity_config.use_implicit_pd:
-                data.ctrl[interface.actuator_ids] = q_target_actuator
-            else:
-                qpos_actuator = np.asarray(data.qpos[interface.actuator_qpos_adr], dtype=np.float64)
-                qvel_actuator = np.asarray(data.qvel[interface.actuator_dof_adr], dtype=np.float64)
-                explicit_tau = stiffness_actuator * (q_target_actuator - qpos_actuator)
-                explicit_tau -= damping_actuator * qvel_actuator
-                data.ctrl[interface.actuator_ids] = np.clip(explicit_tau, -effort_limit_actuator, effort_limit_actuator)
+            qpos_actuator = np.asarray(data.qpos[interface.actuator_qpos_adr], dtype=np.float64)
+            qvel_actuator = np.asarray(data.qvel[interface.actuator_dof_adr], dtype=np.float64)
+            data.ctrl[interface.actuator_ids] = _compute_actuator_control(
+                q_target_actuator,
+                qpos_actuator,
+                qvel_actuator,
+                stiffness_actuator,
+                damping_actuator,
+                effort_limit_actuator,
+                velocity_limit_actuator,
+                use_implicit_pd=parity_config.use_implicit_pd,
+                emulate_velocity_limit=args.emulate_velocity_limit,
+            )
             mujoco.mj_step(model, data)
             # actuator_force is the force MuJoCo actually applied during the
             # completed step. Capture it before mj_forward recomputes forces at

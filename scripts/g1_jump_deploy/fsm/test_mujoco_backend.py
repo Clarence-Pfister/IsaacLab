@@ -86,6 +86,23 @@ def test_torque_projection_is_applied_at_the_physics_rate() -> None:
     assert np.all(robot.command_target < position + 0.1)
 
 
+def test_velocity_limit_emulation_reduces_only_opted_in_torque() -> None:
+    without_emulation = MujocoRobot(_MANIFEST, _MODEL, _OVERLAY)
+    with_emulation = MujocoRobot(_MANIFEST, _MODEL, _OVERLAY, emulate_velocity_limit=True)
+    for robot in (without_emulation, with_emulation):
+        velocity = robot._manifest.velocity_limit.copy()
+        robot.data.qvel[robot._dof_addresses] = velocity
+        robot.command_joint_position_target(
+            robot.joint_positions + 0.1,
+            np.full(robot.joint_count, 100.0),
+            np.zeros(robot.joint_count),
+        )
+        robot.step_physics(np.zeros(robot.joint_count))
+
+    assert np.all(without_emulation.applied_torque > 0.0)
+    np.testing.assert_allclose(with_emulation.applied_torque, 0.0, rtol=0.0, atol=1.0e-12)
+
+
 def test_gantry_support_reduces_initial_downward_acceleration() -> None:
     unsupported = MujocoRobot(_MANIFEST, _MODEL, _OVERLAY)
     supported = MujocoRobot(_MANIFEST, _MODEL, _OVERLAY, gantry_support_fraction=0.5)

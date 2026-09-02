@@ -11,6 +11,7 @@ import hashlib
 import json
 import math
 import sys
+import threading
 import time
 import wave
 from dataclasses import replace
@@ -26,17 +27,25 @@ from scripts.g1_jump_deploy.hardware.run_fsm_g1 import (
     _FAST_DT,
     _GANTRY_STAND_ENTRY_LEG_ERROR_LIMIT_RAD,
     _TARGET_RATE_LIMIT_RAD_S,
+    FeedbackLimits,
     FeedbackSnapshot,
     HardwareManifest,
     SafetyFault,
+    _active_feedback_limits,
+    _active_target_rate_limit,
     _bridge_native_stand_to_passive,
     _feedback_fault,
     _G1Robot,
     _GantryRehearsalOperator,
+    _ground_stand_configuration,
+    _GroundJumpRecorder,
     _InactivePolicy,
+    _InteractiveGoalReader,
     _load_hardware_manifest,
+    _lock_ground_session_after_abort,
     _native_walkrun_handoff_fault,
     _parse_args,
+    _parse_ground_goal,
     _play_audio_cue,
     _project_shadow_target,
     _read_audio_cue,
@@ -70,6 +79,7 @@ def _manifest() -> HardwareManifest:
         stiffness=np.full(23, 40.0),
         damping=np.full(23, 2.0),
         initial_root_height=0.8,
+        reference_root_quaternion_wxyz=np.asarray((1.0, 0.0, 0.0, 0.0)),
         policy_dt=0.02,
     )
 
@@ -103,6 +113,7 @@ def _leg_manifest() -> HardwareManifest:
         stiffness=manifest.stiffness,
         damping=manifest.damping,
         initial_root_height=manifest.initial_root_height,
+        reference_root_quaternion_wxyz=manifest.reference_root_quaternion_wxyz,
         policy_dt=manifest.policy_dt,
     )
 
@@ -157,13 +168,14 @@ def _hardware_manifest_dict() -> dict:
             "stiffness": [40.0] * 23,
             "damping": [2.0] * 23,
         },
-        "reference": {"root_frame0": {"pos": [0.0, 0.0, 0.8]}},
+        "reference": {"root_frame0": {"pos": [0.0, 0.0, 0.8], "quat_xyzw": [0.0, 0.0, 0.0, 1.0]}},
         "control": {"policy_dt": 0.02, "sim_dt": 0.002},
     }
 
 
 def test_load_hardware_manifest(tmp_path: Path) -> None:
     manifest = _hardware_manifest_dict()
+    manifest["reference"]["root_frame0"]["quat_xyzw"] = [0.0, 0.1, 0.0, math.sqrt(0.99)]
     path = tmp_path / "deploy_manifest.json"
     path.write_text(json.dumps(manifest), encoding="utf-8")
 
@@ -172,9 +184,41 @@ def test_load_hardware_manifest(tmp_path: Path) -> None:
     assert loaded.joint_count == 23
     assert loaded.sdk_slots == tuple(range(23))
     assert loaded.initial_root_height == pytest.approx(0.8)
+    np.testing.assert_allclose(
+        loaded.reference_root_quaternion_wxyz,
+        (math.sqrt(0.99), 0.0, 0.1, 0.0),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
     np.testing.assert_array_equal(loaded.lower_limit_velocity_lookahead, np.full(23, 0.028))
     np.testing.assert_array_equal(loaded.effort_limit_ratio, np.full(23, 0.6))
     np.testing.assert_array_equal(loaded.effort_limit, np.full(23, 10.0))
+
+
+def test_ground_stand_configuration_uses_reference_attitude_and_prepared_leg_gains() -> None:
+    pitch = math.radians(7.49)
+    manifest = replace(
+        _leg_manifest(),
+        reference_root_quaternion_wxyz=np.asarray((math.cos(0.5 * pitch), 0.0, math.sin(0.5 * pitch), 0.0)),
+    )
+
+    stand_gains, balance_config = _ground_stand_configuration(manifest)
+
+    assert stand_gains.ankle_stiffness == pytest.approx(80.0)
+    assert stand_gains.ankle_damping == pytest.approx(7.0)
+    assert set(stand_gains.stiffness_overrides or {}) == {
+        "left_hip_pitch_joint",
+        "right_hip_pitch_joint",
+        "left_knee_joint",
+        "right_knee_joint",
+    }
+    assert set((stand_gains.stiffness_overrides or {}).values()) == {200.0}
+    assert set((stand_gains.damping_overrides or {}).values()) == {5.0}
+    assert balance_config.target_roll == pytest.approx(0.0)
+    assert balance_config.target_pitch == pytest.approx(pitch)
+    assert balance_config.integral_enabled
+    assert balance_config.initial_roll_integral == pytest.approx(0.0)
+    assert balance_config.initial_pitch_integral == pytest.approx(0.2)
 
 
 def test_load_hardware_manifest_accepts_retrigger_aware_schema(tmp_path: Path) -> None:
@@ -408,6 +452,246 @@ def test_gantry_policy_rehearsal_cli_is_fail_closed(monkeypatch, tmp_path: Path)
     assert args.effort_scale == pytest.approx(0.1)
     assert args.shadow_admission == admission_path
     assert args.rehearsal_log == log_path
+
+
+def test_gantry_rehearsal_escalation_requires_acknowledgement(monkeypatch, tmp_path: Path) -> None:
+    arguments = [
+        "run_fsm_g1.py",
+        "enp131s0",
+        "--gantry_policy_rehearsal",
+        "--enable_control",
+        "--acknowledge_contactless_rehearsal",
+        "--entry_mode",
+        "gantry_standup",
+        "--duration",
+        "15",
+        "--shadow_admission",
+        str(tmp_path / "admission.json"),
+        "--rehearsal_log",
+        str(tmp_path / "rehearsal.npz"),
+        "--rehearsal_effort_scale_override",
+        "0.3",
+        "--rehearsal_unlimited_slew",
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+    arguments.append("--acknowledge_rehearsal_escalation")
+    monkeypatch.setattr(sys, "argv", arguments)
+    args = _parse_args()
+
+    assert args.rehearsal_escalated
+    assert args.effort_scale == pytest.approx(0.3)
+    assert args.rehearsal_unlimited_slew
+
+
+@pytest.mark.parametrize("override", ["0.1", "0.61", "nan"])
+def test_gantry_rehearsal_escalation_rejects_invalid_effort(monkeypatch, tmp_path: Path, override: str) -> None:
+    arguments = [
+        "run_fsm_g1.py",
+        "enp131s0",
+        "--gantry_policy_rehearsal",
+        "--enable_control",
+        "--acknowledge_contactless_rehearsal",
+        "--acknowledge_rehearsal_escalation",
+        "--entry_mode",
+        "gantry_standup",
+        "--duration",
+        "15",
+        "--shadow_admission",
+        str(tmp_path / "admission.json"),
+        "--rehearsal_log",
+        str(tmp_path / "rehearsal.npz"),
+        "--rehearsal_effort_scale_override",
+        override,
+    ]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize(
+    "option",
+    [
+        "--rehearsal_effort_scale_override",
+        "--rehearsal_unlimited_slew",
+        "--acknowledge_rehearsal_escalation",
+    ],
+)
+def test_rehearsal_escalation_options_require_rehearsal(monkeypatch, option: str) -> None:
+    arguments = ["run_fsm_g1.py", "enp131s0", option]
+    if option == "--rehearsal_effort_scale_override":
+        arguments.append("0.3")
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def _ground_jump_arguments(tmp_path: Path) -> list[str]:
+    return [
+        "run_fsm_g1.py",
+        "enp131s0",
+        "--ground_jump",
+        "--enable_control",
+        "--acknowledge_unmeasured_ground_jump",
+        "--shadow_admission",
+        str(tmp_path / "admission.json"),
+        "--ground_log",
+        str(tmp_path / "ground.npz"),
+        "--effort_scale",
+        "0.3",
+        "--duration",
+        "20",
+        "--entry_mode",
+        "native_stand",
+        "--exit_mode",
+        "passive",
+        "--goal_sequence",
+        "0.0,0.1,-0.1",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("option", "takes_value"),
+    [
+        ("--acknowledge_unmeasured_ground_jump", False),
+        ("--shadow_admission", True),
+        ("--ground_log", True),
+        ("--effort_scale", True),
+    ],
+)
+def test_ground_jump_cli_requires_explicit_safety_options(
+    monkeypatch, tmp_path: Path, option: str, takes_value: bool
+) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    index = arguments.index(option)
+    del arguments[index : index + (2 if takes_value else 1)]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize(
+    "replacement",
+    [
+        ["--effort_scale", "0.61"],
+        ["--entry_mode", "gantry_standup"],
+        ["--duration", "19"],
+    ],
+)
+def test_ground_jump_cli_rejects_relaxed_contract(monkeypatch, tmp_path: Path, replacement: list[str]) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    index = arguments.index(replacement[0])
+    arguments[index : index + 2] = replacement
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ground_jump_cli_is_mutually_exclusive_with_rehearsal(monkeypatch, tmp_path: Path) -> None:
+    arguments = _ground_jump_arguments(tmp_path) + ["--gantry_policy_rehearsal"]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ground_jump_goal_sequence_uses_manifest_range(monkeypatch, tmp_path: Path) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    monkeypatch.setattr(sys, "argv", arguments)
+    args = _parse_args()
+
+    assert [goal.dx for goal in args.ground_goals] == pytest.approx([0.0, 0.1, -0.1])
+    assert all((goal.dy, goal.dyaw, goal.roll, goal.pitch) == (0.0, 0.0, 0.0, 0.0) for goal in args.ground_goals)
+
+    arguments[arguments.index("--goal_sequence") + 1] = "0.1001"
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ground_jump_allows_two_jump_session_duration_but_keeps_a_ceiling(monkeypatch, tmp_path: Path) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    arguments[arguments.index("--duration") + 1] = "45"
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    assert _parse_args().duration == pytest.approx(45.0)
+
+    arguments[arguments.index("--duration") + 1] = "61"
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_interactive_goal_reader_never_blocks_control_thread() -> None:
+    release_read = threading.Event()
+
+    class _BlockingInput:
+        def readline(self) -> str:
+            release_read.wait(timeout=1.0)
+            return "0.1\n"
+
+    reader = _InteractiveGoalReader(_BlockingInput())
+    started_at = time.monotonic()
+    reader.request()
+
+    assert time.monotonic() - started_at < 0.1
+    assert reader.poll() is None
+    release_read.set()
+    deadline = time.monotonic() + 1.0
+    result = None
+    while result is None and time.monotonic() < deadline:
+        result = reader.poll()
+        time.sleep(0.001)
+
+    assert result == "0.1"
+    assert _parse_ground_goal(result, (-0.1, 0.1)) == JumpGoal(0.1, 0.0, 0.0)
+
+
+def test_interactive_goal_reader_treats_eof_as_unavailable_not_q(capsys) -> None:
+    reader = _InteractiveGoalReader(SimpleNamespace(readline=lambda: ""))
+    reader.request()
+    deadline = time.monotonic() + 1.0
+    while not reader.eof and time.monotonic() < deadline:
+        assert reader.poll() is None
+        time.sleep(0.001)
+
+    assert reader.eof
+    assert capsys.readouterr().out.count("STDIN EOF: no interactive input available") == 1
+    with pytest.raises(RuntimeError, match="unavailable"):
+        reader.request()
+
+
+def test_interactive_goal_reader_returns_explicit_q() -> None:
+    reader = _InteractiveGoalReader(SimpleNamespace(readline=lambda: "q\n"))
+    reader.request()
+    deadline = time.monotonic() + 1.0
+    result = None
+    while result is None and time.monotonic() < deadline:
+        result = reader.poll()
+        time.sleep(0.001)
+
+    assert result == "q"
+    assert not reader.eof
+
+
+def test_ground_session_locks_and_clears_pending_goal_after_latched_abort(capsys) -> None:
+    operator = _GantryRehearsalOperator(JumpGoal(0.1, 0.0, 0.0))
+    fsm = SimpleNamespace(abort_latched=False)
+
+    assert not _lock_ground_session_after_abort(fsm, operator, False)
+    assert operator.pending_goal == JumpGoal(0.1, 0.0, 0.0)
+    fsm.abort_latched = True
+    assert _lock_ground_session_after_abort(fsm, operator, False)
+    assert _lock_ground_session_after_abort(fsm, operator, True)
+
+    assert operator.pending_goal is None
+    assert capsys.readouterr().out.count("SESSION LOCKED after latched abort; B to exit") == 1
 
 
 @pytest.mark.parametrize(
@@ -697,6 +981,68 @@ def test_feedback_accepts_measurement_outside_narrower_target_clip() -> None:
     snapshot.joint_positions[0] = 1.05
 
     assert _feedback_fault(snapshot, _manifest(), now) is None
+
+
+def test_ground_dynamic_feedback_limits_allow_jump_envelope_only() -> None:
+    now = 100.0
+    manifest = _manifest()
+    snapshot = _snapshot(now)
+    snapshot.joint_velocities[0] = 24.9
+    snapshot.joint_positions[1] = 1.119
+    snapshot.imu_gyroscope[0] = 11.9
+    object.__setattr__(
+        snapshot,
+        "imu_quaternion",
+        np.asarray((math.cos(math.radians(22.0)), math.sin(math.radians(22.0)), 0.0, 0.0)),
+    )
+
+    assert (
+        _feedback_fault(
+            snapshot,
+            manifest,
+            now,
+            _active_feedback_limits(manifest, JumpControllerState.JUMP, ground_jump=True, rehearsal_escalated=False),
+        )
+        is None
+    )
+    assert "body tilt" in (_feedback_fault(snapshot, manifest, now, FeedbackLimits()) or "")
+    assert (
+        _active_feedback_limits(manifest, JumpControllerState.ARMED, ground_jump=True, rehearsal_escalated=False)
+        == FeedbackLimits()
+    )
+    assert _active_target_rate_limit(
+        JumpControllerState.ARMED, ground_jump=True, rehearsal_unlimited_slew=False
+    ) == pytest.approx(_TARGET_RATE_LIMIT_RAD_S)
+    assert _active_target_rate_limit(JumpControllerState.JUMP, ground_jump=True, rehearsal_unlimited_slew=False) is None
+    assert (
+        _active_target_rate_limit(JumpControllerState.SETTLE, ground_jump=True, rehearsal_unlimited_slew=False) is None
+    )
+    assert _active_target_rate_limit(
+        JumpControllerState.GOTO_START, ground_jump=True, rehearsal_unlimited_slew=False
+    ) == pytest.approx(_TARGET_RATE_LIMIT_RAD_S)
+    assert _active_target_rate_limit(
+        JumpControllerState.STAND, ground_jump=True, rehearsal_unlimited_slew=False
+    ) == pytest.approx(_TARGET_RATE_LIMIT_RAD_S)
+    rehearsal_limits = _active_feedback_limits(
+        manifest, JumpControllerState.JUMP, ground_jump=False, rehearsal_escalated=True
+    )
+    ground_limits = _active_feedback_limits(
+        manifest, JumpControllerState.JUMP, ground_jump=True, rehearsal_escalated=False
+    )
+    assert rehearsal_limits.body_tilt_limit_rad == pytest.approx(ground_limits.body_tilt_limit_rad)
+    assert rehearsal_limits.base_angular_speed_limit_rad_s == pytest.approx(
+        ground_limits.base_angular_speed_limit_rad_s
+    )
+    assert rehearsal_limits.joint_position_margin_rad == pytest.approx(ground_limits.joint_position_margin_rad)
+    np.testing.assert_array_equal(rehearsal_limits.joint_speed_limit_rad_s, ground_limits.joint_speed_limit_rad_s)
+    assert (
+        _active_feedback_limits(manifest, JumpControllerState.SETTLE, ground_jump=False, rehearsal_escalated=True)
+        == FeedbackLimits()
+    )
+    assert _active_target_rate_limit(JumpControllerState.JUMP, ground_jump=False, rehearsal_unlimited_slew=True) is None
+    assert (
+        _active_target_rate_limit(JumpControllerState.SETTLE, ground_jump=False, rehearsal_unlimited_slew=True) is None
+    )
 
 
 class _FakeStateBuffer:
@@ -1047,9 +1393,131 @@ def test_rehearsal_recorder_logs_only_accepted_command_and_never_overwrites(
         assert metadata["ground_jump_authorized"] is False
         assert metadata["contact_sensor_available"] is False
         assert metadata["effort_scale"] == pytest.approx(0.1)
+        assert metadata["ratio_envelope_exceeded_by_position_bound"] == {
+            "total_count": 0,
+            "per_joint_count": {},
+            "per_joint_maximum_excess_nm": {},
+        }
 
     with pytest.raises(ValueError, match="Cannot create rehearsal log"):
         recorder.write(True, "completed", state_buffer)
+
+
+def test_ground_recorder_writes_authorization_and_per_jump_outcome(monkeypatch, tmp_path: Path) -> None:
+    class _Clock:
+        def __init__(self):
+            self.current = 100.0
+
+        def monotonic(self) -> float:
+            self.current += _FAST_DT
+            return self.current
+
+    clock = _Clock()
+    monkeypatch.setattr("scripts.g1_jump_deploy.hardware.run_fsm_g1.time.monotonic", clock.monotonic)
+    state_buffer = _FakeStateBuffer(_snapshot(clock.current))
+    state_buffer.valid_packets = 1
+    state_buffer.crc_errors = 0
+    state_buffer.invalid_packets = 0
+    manifest = _leg_manifest()
+    stand_gains, balance_config = _ground_stand_configuration(manifest)
+    robot = _G1Robot(manifest, state_buffer, _FakePublisher(), _low_command(), _FakeCrc())
+    robot.command_joint_position_target(np.zeros(23), np.full(23, 4.0), np.full(23, 0.5))
+    manifest_path = tmp_path / "deploy_manifest.json"
+    policy_path = tmp_path / "policy.onnx"
+    admission_path = tmp_path / "admission.json"
+    manifest_path.write_bytes(b"manifest")
+    policy_path.write_bytes(b"policy")
+    admission_path.write_bytes(b"admission")
+    recorder = _GroundJumpRecorder(
+        tmp_path / "ground.npz",
+        manifest_path,
+        policy_path,
+        admission_path,
+        manifest,
+        0.3,
+        stand_gains,
+        balance_config,
+        1.0,
+        True,
+        0.5,
+        4.0,
+        0.05,
+        0.02,
+    )
+    fsm = SimpleNamespace(
+        state=JumpControllerState.JUMP,
+        episode_step=1,
+        latched_goal=JumpGoal(0.1, 0.0, 0.0),
+        abort_latched=True,
+        latched_abort_reason="joint limit exceeded",
+        latched_abort_reasons={"joint limit exceeded"},
+        joint_limit_touches={"left_knee_joint": 0.0003},
+    )
+    for state, step in (
+        (JumpControllerState.JUMP, 1),
+        (JumpControllerState.SETTLE, 152),
+        (JumpControllerState.STAND, 152),
+    ):
+        fsm.state = state
+        fsm.episode_step = step
+        robot.publish(np.zeros(23), effort_scale=0.3)
+        recorder.record(robot, fsm, np.zeros(23))
+    recorder.write(True, "completed", state_buffer)
+
+    with np.load(recorder.log_path, allow_pickle=False) as log:
+        metadata = json.loads(log["metadata_json"].item())
+        np.testing.assert_array_equal(log["maximum_joint_speed_fraction"], 0.0)
+        np.testing.assert_array_equal(log["body_tilt_rad"], 0.0)
+        assert log["maximum_joint_speed_fraction"].shape == (3,)
+    assert metadata["mode"] == "unmeasured_ground_jump"
+    assert metadata["ground_jump_authorized"] is True
+    assert metadata["contact_sensor_available"] is False
+    assert metadata["ratio_envelope_exceeded_by_position_bound"] == {
+        "total_count": 0,
+        "per_joint_count": {},
+        "per_joint_maximum_excess_nm": {},
+    }
+    assert metadata["ground_stand_controller"] == {
+        "ankle_damping_nm_s_per_rad": 7.0,
+        "ankle_stiffness_nm_per_rad": 80.0,
+        "balance_initial_pitch_integral_rad_s": 0.2,
+        "balance_initial_roll_integral_rad_s": 0.0,
+        "balance_integral_enabled": True,
+        "balance_target_pitch_rad": 0.0,
+        "balance_target_roll_rad": 0.0,
+        "balance_target_entry_duration_s": 1.0,
+        "joint_limit_abort_margin_rad": 0.02,
+        "policy_stand_after_jump": True,
+        "settle_duration_s": 0.5,
+        "settle_timeout_s": 4.0,
+        "settle_joint_velocity_tolerance_rad_s": 0.05,
+        "damping_overrides_nm_s_per_rad": {
+            "left_hip_pitch_joint": 5.0,
+            "left_knee_joint": 5.0,
+            "right_hip_pitch_joint": 5.0,
+            "right_knee_joint": 5.0,
+        },
+        "stand_entry_duration_s": 1.0,
+        "stiffness_overrides_nm_per_rad": {
+            "left_hip_pitch_joint": 200.0,
+            "left_knee_joint": 200.0,
+            "right_hip_pitch_joint": 200.0,
+            "right_knee_joint": 200.0,
+        },
+    }
+    assert metadata["jumps"] == [
+        {
+            "goal": {"pitch": 0.0, "pos_x": 0.1, "pos_y": 0.0, "roll": 0.0, "yaw": 0.0},
+            "start_policy_step": 0,
+            "end_policy_step": 152,
+            "outcome": "latched_abort_settled",
+            "latched_abort_reason": "joint limit exceeded",
+            "latched_abort_reasons": ["joint limit exceeded"],
+            "max_tilt_rad": 0.0,
+            "max_estimated_torque_fraction": 0.0,
+            "joint_limit_touches_rad": {"left_knee_joint": 0.0003},
+        }
+    ]
 
 
 def test_publish_can_use_unrated_torque_projected_dynamic_target(monkeypatch) -> None:
@@ -1102,21 +1570,44 @@ def test_publish_projects_position_target_to_manifest_torque_envelope(monkeypatc
     assert robot.maximum_estimated_torque[0] == pytest.approx(6.0)
 
 
-def test_publish_refuses_when_target_bounds_make_torque_projection_impossible(monkeypatch) -> None:
+def test_publish_allows_position_bound_ratio_excess_below_physical_limit(monkeypatch, capsys) -> None:
     now = 100.0
     monkeypatch.setattr("scripts.g1_jump_deploy.hardware.run_fsm_g1.time.monotonic", lambda: now)
-    manifest = replace(
-        _manifest(),
-        effort_limit_ratio=np.full(23, 0.6),
-        stiffness=np.full(23, 1_000.0),
-    )
+    manifest = replace(_manifest(), effort_limit_ratio=np.full(23, 0.6))
     snapshot = _snapshot(now)
-    snapshot.joint_positions[0] = 1.05
+    snapshot.joint_positions[0] = 0.95
+    snapshot.joint_velocities[0] = 2.0
     publisher = _FakePublisher()
     robot = _G1Robot(manifest, _FakeStateBuffer(snapshot), publisher, _low_command(), _FakeCrc())
-    robot.command_joint_position_target(np.ones(23), manifest.stiffness, np.zeros(23))
+    damping = np.zeros(23)
+    damping[0] = 4.0
+    robot.command_joint_position_target(np.ones(23), np.full(23, 10.0), damping)
 
-    with pytest.raises(SafetyFault, match="target bounds cannot satisfy"):
+    robot.publish(np.zeros(23), effort_scale=1.0, target_rate_limit_rad_s=None)
+    robot.publish(np.zeros(23), effort_scale=1.0, target_rate_limit_rad_s=None)
+
+    assert len(publisher.messages) == 2
+    assert robot.ratio_envelope_position_bound_counts[0] == 2
+    assert robot.ratio_envelope_position_bound_maximum_excess[0] == pytest.approx(1.5)
+    warning = capsys.readouterr().out
+    assert warning.count("ratio envelope exceeded by position bound for joint_0") == 1
+    assert "excess=1.50 N m" in warning
+
+
+def test_publish_refuses_when_target_bounds_exceed_physical_torque_limit(monkeypatch) -> None:
+    now = 100.0
+    monkeypatch.setattr("scripts.g1_jump_deploy.hardware.run_fsm_g1.time.monotonic", lambda: now)
+    manifest = replace(_manifest(), effort_limit_ratio=np.full(23, 0.6))
+    snapshot = _snapshot(now)
+    snapshot.joint_positions[0] = 0.95
+    snapshot.joint_velocities[0] = 2.0
+    publisher = _FakePublisher()
+    robot = _G1Robot(manifest, _FakeStateBuffer(snapshot), publisher, _low_command(), _FakeCrc())
+    damping = np.zeros(23)
+    damping[0] = 6.0
+    robot.command_joint_position_target(np.ones(23), np.full(23, 10.0), damping)
+
+    with pytest.raises(SafetyFault, match="target bounds exceed the physical torque limit"):
         robot.publish(np.zeros(23), effort_scale=1.0, target_rate_limit_rad_s=None)
 
     assert publisher.messages == []

@@ -49,6 +49,7 @@ _START_TIME_S = 0.5
 _CONFIRM_TIME_S = 2.7
 _EARLY_ABORT_TIME_S = 2.9
 _CONTACTLESS_REHEARSAL_ARMED_TIMEOUT_S = 15.0
+_CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S = 1.2
 _UNMEASURED_GROUND_CONFIRM_TIME_S = 2.8
 _UNMEASURED_GROUND_POLICY_PREPARE_DURATION_S = 0.0
 _UNMEASURED_GROUND_STAND_STIFFNESS = 200.0
@@ -66,6 +67,11 @@ _HARDWARE_MARGIN_MIN_PELVIS_HEIGHT_M = 0.65
 _HARDWARE_MARGIN_MAX_TARGET_ERROR_RAD = 0.2
 _COMMAND_TRACKING_MAX_PLANAR_ERROR_M = 0.08
 _COMMAND_TRACKING_MIN_DIRECTED_PROGRESS_M = 0.02
+_PREJUMP_HOLD_MAX_TILT_RAD = math.radians(30.0)
+_PREJUMP_HOLD_MIN_PELVIS_HEIGHT_M = 0.5
+_PREJUMP_HOLD_STATES = frozenset(
+    (JumpControllerState.STAND.value, JumpControllerState.GOTO_START.value, JumpControllerState.ARMED.value)
+)
 
 
 @dataclass(frozen=True)
@@ -777,24 +783,70 @@ def _scenario_result(
     )
 
 
+def _prejump_hold_upright_result(arrays: dict[str, np.ndarray]) -> tuple[bool, str]:
+    """Check simulated ground truth throughout STAND, GOTO_START, and ARMED."""
+    states = np.asarray(arrays["fsm_state"])
+    times = np.asarray(arrays["time"], dtype=np.float64)
+    tilts = np.asarray(arrays["tilt"], dtype=np.float64)
+    pelvis_pose = np.asarray(arrays["pelvis_pose"], dtype=np.float64)
+    if states.ndim != 1 or times.shape != states.shape or tilts.shape != states.shape:
+        return False, "hold trajectory arrays have inconsistent shapes"
+    if pelvis_pose.shape != (states.size, 7):
+        return False, "pelvis_pose must have shape (samples, 7)"
+    hold_mask = np.isin(states, tuple(_PREJUMP_HOLD_STATES))
+    if not np.any(hold_mask):
+        return False, "trajectory has no STAND, GOTO_START, or ARMED samples"
+    hold_indices = np.flatnonzero(hold_mask)
+    hold_tilts = tilts[hold_indices]
+    hold_heights = pelvis_pose[hold_indices, 2]
+    invalid = ~np.isfinite(hold_tilts) | ~np.isfinite(hold_heights)
+    excessive_tilt = hold_tilts > _PREJUMP_HOLD_MAX_TILT_RAD
+    low_pelvis = hold_heights < _PREJUMP_HOLD_MIN_PELVIS_HEIGHT_M
+    failed = invalid | excessive_tilt | low_pelvis
+    if np.any(failed):
+        sample_index = int(hold_indices[int(np.flatnonzero(failed)[0])])
+        return False, (
+            f"{states[sample_index]} violated upright hold at t={times[sample_index]:.3f} s: "
+            f"tilt={math.degrees(tilts[sample_index]):.2f} deg "
+            f"(limit {math.degrees(_PREJUMP_HOLD_MAX_TILT_RAD):.2f}), "
+            f"pelvis_z={pelvis_pose[sample_index, 2]:.3f} m "
+            f"(minimum {_PREJUMP_HOLD_MIN_PELVIS_HEIGHT_M:.3f})"
+        )
+    return True, (
+        f"peak tilt={math.degrees(float(np.max(hold_tilts))):.2f} deg, "
+        f"minimum pelvis_z={float(np.min(hold_heights)):.3f} m"
+    )
+
+
 def _validate_contactless_gantry_rehearsal_args(
     parser: argparse.ArgumentParser,
     args: argparse.Namespace,
 ) -> None:
     """Enforce the exact simulated hardware-rehearsal envelope."""
+    rehearsal_escalated = args.rehearsal_effort_scale_override is not None or args.rehearsal_unlimited_slew
     if not args.contactless_gantry_rehearsal:
+        if rehearsal_escalated or args.acknowledge_rehearsal_escalation:
+            parser.error("rehearsal escalation options require --contactless_gantry_rehearsal.")
         return
+    if rehearsal_escalated and not args.acknowledge_rehearsal_escalation:
+        parser.error("rehearsal escalation requires --acknowledge_rehearsal_escalation.")
+    if args.acknowledge_rehearsal_escalation and not rehearsal_escalated:
+        parser.error("--acknowledge_rehearsal_escalation requires a rehearsal escalation option.")
+    if args.rehearsal_effort_scale_override is not None and (
+        not math.isfinite(args.rehearsal_effort_scale_override) or not 0.1 < args.rehearsal_effort_scale_override <= 0.6
+    ):
+        parser.error("--rehearsal_effort_scale_override must be finite and in (0.1, 0.6].")
     if args.scenario != "nominal":
         parser.error("--contactless_gantry_rehearsal requires --scenario nominal.")
     if not math.isclose(args.gantry_support_fraction, 1.0, rel_tol=0.0, abs_tol=1.0e-12):
         parser.error("--contactless_gantry_rehearsal requires --gantry_support_fraction 1.0.")
-    if not math.isclose(args.effort_scale, 0.1, rel_tol=0.0, abs_tol=1.0e-12):
+    if args.rehearsal_effort_scale_override is None and not math.isclose(
+        args.effort_scale, 0.1, rel_tol=0.0, abs_tol=1.0e-12
+    ):
         parser.error("--contactless_gantry_rehearsal requires --effort_scale 0.1.")
-    if args.target_rate_limit_rad_s is None or not math.isclose(
-        args.target_rate_limit_rad_s,
-        1.2,
-        rel_tol=0.0,
-        abs_tol=1.0e-12,
+    if not args.rehearsal_unlimited_slew and (
+        args.target_rate_limit_rad_s is None
+        or not math.isclose(args.target_rate_limit_rad_s, 1.2, rel_tol=0.0, abs_tol=1.0e-12)
     ):
         parser.error("--contactless_gantry_rehearsal requires --target_rate_limit_rad_s 1.2.")
     if args.max_duration < 15.0:
@@ -862,6 +914,11 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     parser.add_argument("--log", type=Path, default=None, help="Defaults to fsm_mujoco_<scenario>.npz.")
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--max_duration", type=float, default=8.0, help="Maximum simulated duration [s].")
+    parser.add_argument(
+        "--emulate_velocity_limit",
+        action="store_true",
+        help="Emulate manifest actuator velocity limits with torque-speed saturation.",
+    )
     contact_contract = parser.add_mutually_exclusive_group()
     contact_contract.add_argument(
         "--contactless_gantry_rehearsal",
@@ -875,6 +932,36 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
             "Keep MuJoCo ground collision and contact truth for auditing while preventing the FSM "
             "from reading foot contact; simulation only."
         ),
+    )
+    parser.add_argument(
+        "--latched_abort_upright_settle",
+        action="store_true",
+        help=(
+            "After a joint-limit-only latched post-takeoff abort, settle instead of damping when the "
+            "completed episode remains within the configured upright tilt limit."
+        ),
+    )
+    parser.add_argument(
+        "--joint_limit_abort_margin_rad",
+        type=float,
+        default=JumpControllerConfig().joint_limit_abort_margin_rad,
+        help="In-JUMP travel allowed beyond each manifest joint limit before aborting [rad].",
+    )
+    parser.add_argument(
+        "--rehearsal_effort_scale_override",
+        type=float,
+        default=None,
+        help="Escalated contactless-rehearsal effort scale in (0.1, 0.6].",
+    )
+    parser.add_argument(
+        "--rehearsal_unlimited_slew",
+        action="store_true",
+        help="Disable the target slew limit for an escalated contactless rehearsal.",
+    )
+    parser.add_argument(
+        "--acknowledge_rehearsal_escalation",
+        action="store_true",
+        help="Acknowledge the higher-speed/higher-effort contactless-rehearsal envelope.",
     )
     parser.add_argument(
         "--start_time_s",
@@ -1067,6 +1154,10 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         ),
     )
     args = parser.parse_args()
+    if args.latched_abort_upright_settle and not args.unmeasured_ground_validation:
+        parser.error("--latched_abort_upright_settle requires --unmeasured_ground_validation.")
+    if not math.isfinite(args.joint_limit_abort_margin_rad) or args.joint_limit_abort_margin_rad < 0.0:
+        parser.error("--joint_limit_abort_margin_rad must be a finite non-negative angle.")
     if args.policy_prepare_duration_s is None:
         args.policy_prepare_duration_s = (
             _UNMEASURED_GROUND_POLICY_PREPARE_DURATION_S if args.unmeasured_ground_validation else 0.0
@@ -1179,6 +1270,10 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         if len(set(args.repeat_goal_pos_x)) != len(args.repeat_goal_pos_x):
             parser.error("--repeat_goal_pos_x values must be distinct.")
     _validate_contactless_gantry_rehearsal_args(parser, args)
+    if args.rehearsal_effort_scale_override is not None:
+        args.effort_scale = args.rehearsal_effort_scale_override
+    if args.rehearsal_unlimited_slew:
+        args.target_rate_limit_rad_s = None
     _validate_unmeasured_ground_args(parser, args)
     return args
 
@@ -1194,6 +1289,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         args.overlay,
         effort_scale=args.effort_scale,
         target_rate_limit_rad_s=args.target_rate_limit_rad_s,
+        emulate_velocity_limit=args.emulate_velocity_limit,
         gantry_support_fraction=args.gantry_support_fraction,
         ground_contact_enabled=not args.contactless_gantry_rehearsal,
     )
@@ -1299,6 +1395,8 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
                 else JumpControllerConfig.ContactSafetyMode.MEASURED
             )
         ),
+        latched_abort_upright_settle=args.latched_abort_upright_settle,
+        joint_limit_abort_margin_rad=args.joint_limit_abort_margin_rad,
     )
 
     if args.scenario == "stand":
@@ -1357,11 +1455,25 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         "effort_limits": robot.effort_limits.tolist(),
         "command_effort_limits": robot.command_effort_limits.tolist(),
         "effort_scale": args.effort_scale,
-        "target_rate_limit_rad_s": args.target_rate_limit_rad_s,
+        "emulate_velocity_limit": args.emulate_velocity_limit,
+        "target_rate_limit_rad_s": (
+            {
+                "stand": _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S,
+                "armed": _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S,
+                "jump": None,
+                "settle": None,
+            }
+            if args.rehearsal_unlimited_slew
+            else args.target_rate_limit_rad_s
+        ),
         "gantry_support_fraction": args.gantry_support_fraction,
         "gantry_support_force_world_n": robot.gantry_support_force_world.tolist(),
         "contactless_gantry_rehearsal": args.contactless_gantry_rehearsal,
         "unmeasured_ground_validation": args.unmeasured_ground_validation,
+        "latched_abort_upright_settle": args.latched_abort_upright_settle,
+        "joint_limit_abort_margin_rad": args.joint_limit_abort_margin_rad,
+        "rehearsal_effort_scale_override": args.rehearsal_effort_scale_override,
+        "rehearsal_unlimited_slew": args.rehearsal_unlimited_slew,
         "ground_contact_enabled": robot.ground_contact_enabled,
         "contact_safety_mode": controller_config.contact_safety_mode.value,
         "start_time_s": args.start_time_s,
@@ -1424,9 +1536,12 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
             f"Stand return: {stand_return_state.label} at t={args.stand_return_start_s:.3f} s "
             f"over {args.stand_return_duration_s:.3f} s"
         )
-    print(
-        f"Command limits: effort_scale={args.effort_scale:.2f}, target_rate_limit={args.target_rate_limit_rad_s} rad/s"
+    target_rate_description = (
+        f"{_CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S} rad/s outside JUMP/SETTLE, unlimited in JUMP/SETTLE"
+        if args.rehearsal_unlimited_slew
+        else f"{args.target_rate_limit_rad_s} rad/s"
     )
+    print(f"Command limits: effort_scale={args.effort_scale:.2f}, target_rate_limit={target_rate_description}")
     if args.gantry_support_fraction > 0.0:
         print(
             f"Gantry support: {100.0 * args.gantry_support_fraction:.0f}% body weight, "
@@ -1436,6 +1551,13 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         print("Contactless rehearsal: ground collision disabled; measured foot contact is unavailable.")
     if args.unmeasured_ground_validation:
         print("Unmeasured-ground validation: ground collision is enabled; FSM foot contact is unavailable.")
+        if args.latched_abort_upright_settle:
+            print("Joint-limit-only latched post-takeoff aborts settle when the completed episode remains upright.")
+        if args.joint_limit_abort_margin_rad > 0.0:
+            print(
+                f"Joint-limit abort margin: {args.joint_limit_abort_margin_rad:.6f} rad; "
+                "shallower stop touches are warnings."
+            )
     if args.policy_prepare_duration_s > 0.0:
         print(
             "Goal-conditioned preparation: "
@@ -1491,6 +1613,8 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
                 control_start = time.monotonic()
                 if stand_return_state is None or control_time_s < args.stand_return_start_s:
                     fsm.step()
+                    for warning in fsm.drain_warnings():
+                        print(warning)
                 control_duration_s = time.monotonic() - control_start
                 robot.record_control_duration(control_duration_s)
                 state_timeline.observe(fsm, control_time_s)
@@ -1541,6 +1665,13 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
                     stand_return_damping,
                 )
 
+            if args.rehearsal_unlimited_slew:
+                target_rate_limit = (
+                    None
+                    if fsm.state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
+                    else _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S
+                )
+                robot.set_target_rate_limit(target_rate_limit)
             balance_offset = fsm.update_balance(robot.sim_dt)
             robot.step_physics(balance_offset)
             logger.append(robot, operator, fsm, policy)
@@ -1593,6 +1724,11 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         args.max_duration,
         expected_jump_count,
     )
+    upright_passed, upright_result = _prejump_hold_upright_result(logger.arrays())
+    print(f"Upright hold audit: {'PASS' if upright_passed else 'FAIL'} — {upright_result}")
+    passed = passed and upright_passed
+    if not upright_passed:
+        result = f"upright hold failed: {upright_result}"
     if args.unmeasured_ground_validation:
         contact_passed, contact_result = _unmeasured_ground_contact_result(logger.arrays(), fsm.flight_start_step)
         print(f"Hidden-contact audit: {'PASS' if contact_passed else 'FAIL'} — {contact_result}")

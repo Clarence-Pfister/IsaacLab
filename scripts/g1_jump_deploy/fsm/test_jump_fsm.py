@@ -180,6 +180,7 @@ def bundle(tmp_path: Path) -> tuple[Path, np.ndarray, np.ndarray, np.ndarray]:
             "unitree_sdk2_slots": list(range(23)),
             "default_pos": default_position.tolist(),
             "default_vel": [0.0] * 23,
+            "position_limits": [[-2.0, 2.0]] * 23,
         },
         "observation": {
             "total_dim": 326,
@@ -372,6 +373,32 @@ def test_policy_native_stand_continues_final_reference_after_jump(
     assert fsm.state is JumpControllerState.STAND
     assert fsm.policy_stand_active
     np.testing.assert_array_equal(offsets, 0.0)
+
+
+def test_margin_enabled_policy_stand_waits_when_velocity_projects_across_limit(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    fsm = JumpControllerFSM(
+        manifest_path,
+        robot,
+        _FakeOperator(),
+        _ZeroPolicy(),
+        config=replace(
+            controller_config,
+            policy_stand_after_jump=True,
+            joint_limit_abort_margin_rad=0.02,
+        ),
+    )
+    robot.follow_commands = False
+    robot.joint_positions[3] = -1.999
+    robot.joint_velocities[3] = -0.1
+
+    failures = fsm._policy_stand_convergence_failures(default_position)
+
+    assert "left_knee_joint velocity projects across its manifest limit within 0.020 s" in failures
 
 
 def test_policy_native_stand_recalibrates_before_normalizing_for_next_goal(
@@ -689,6 +716,39 @@ def test_balance_target_can_be_calibrated_only_while_passive(
         fsm.set_balance_target_attitude(target_roll, target_pitch)
 
 
+def test_initial_stand_linearly_transitions_measured_attitude_to_balance_target(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    robot.imu_quaternion = _quaternion_from_roll_pitch(0.0, 0.0)
+    target_pitch = math.radians(10.0)
+    fsm = JumpControllerFSM(
+        manifest_path,
+        robot,
+        _FakeOperator(),
+        _ZeroPolicy(),
+        config=replace(controller_config, stand_balance_target_entry_duration_s=1.0),
+        balance_config=BalanceControllerConfig(
+            target_roll=0.0,
+            target_pitch=target_pitch,
+            initial_roll_integral=0.0,
+            initial_pitch_integral=0.0,
+        ),
+    )
+
+    fsm.enable()
+    fsm.step()
+    fsm.update_balance(_FAST_DT)
+    assert fsm._balance.config.target_pitch == pytest.approx(0.02 * target_pitch)
+    for _ in range(49):
+        fsm.step()
+        fsm.update_balance(_FAST_DT)
+
+    assert fsm._balance.config.target_pitch == pytest.approx(target_pitch)
+
+
 def test_jump_gains_crossfade_during_manifest_idle_phase(
     controller: tuple[JumpControllerFSM, _FakeRobot, _FakeOperator, _ZeroPolicy],
     bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
@@ -945,6 +1005,202 @@ def test_unmeasured_ground_never_reads_contact_and_latches_late_abort(
     assert fsm.episode_step == _EPISODE_STEPS
     assert len(policy.observations) == _EPISODE_STEPS
     assert fsm.phase_clock_history == list(range(_EPISODE_STEPS))
+
+
+@pytest.mark.parametrize(
+    ("final_tilt_deg", "expected_state", "report_text"),
+    [
+        (5.0, JumpControllerState.SETTLE, "completed upright"),
+        (25.0, JumpControllerState.DAMPING, "upright-settle limit"),
+    ],
+)
+def test_latched_abort_upright_settle_selects_settle_or_damping(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+    final_tilt_deg: float,
+    expected_state: JumpControllerState,
+    report_text: str,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    robot.foot_contact_forces = _ForbiddenContactFeedback()
+    operator = _FakeOperator()
+    fsm = JumpControllerFSM(
+        manifest_path,
+        robot,
+        operator,
+        _ZeroPolicy(),
+        config=replace(
+            controller_config,
+            contact_safety_mode=JumpControllerConfig.ContactSafetyMode.UNMEASURED_GROUND,
+            latched_abort_upright_settle=True,
+        ),
+    )
+    _prepare_armed(fsm, operator)
+    _confirm(fsm, operator)
+    while fsm.episode_step < fsm.flight_start_step:
+        _control_step(fsm)
+    robot.joint_limit_violations[0] = True
+    _control_step(fsm)
+    robot.joint_limit_violations[0] = False
+    while fsm.episode_step < fsm.episode_steps - 1:
+        _control_step(fsm)
+    robot.imu_quaternion = _quaternion_from_roll_pitch(math.radians(final_tilt_deg), 0.0)
+
+    _control_step(fsm)
+
+    assert fsm.state is expected_state
+    assert fsm.latched_abort_reasons == {"joint limit exceeded"}
+    assert "joint limit exceeded" in (fsm.last_report or "")
+    assert report_text in (fsm.last_report or "")
+    if expected_state is JumpControllerState.SETTLE:
+        _advance_to(fsm, JumpControllerState.STAND)
+
+
+@pytest.mark.parametrize(
+    ("fault_kind", "expected_reasons"),
+    [
+        ("operator", {"operator abort"}),
+        ("stale", {"state feedback stale"}),
+        ("deadline", {"control deadline missed"}),
+        ("tilt", {"body tilt limit exceeded"}),
+        ("joint_and_deadline", {"joint limit exceeded", "control deadline missed"}),
+    ],
+)
+def test_latched_abort_upright_settle_rejects_terminal_reason_sets(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+    fault_kind: str,
+    expected_reasons: set[str],
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    operator = _FakeOperator()
+    fsm = JumpControllerFSM(
+        manifest_path,
+        robot,
+        operator,
+        _ZeroPolicy(),
+        config=replace(
+            controller_config,
+            contact_safety_mode=JumpControllerConfig.ContactSafetyMode.UNMEASURED_GROUND,
+            latched_abort_upright_settle=True,
+        ),
+    )
+    _prepare_armed(fsm, operator)
+    _confirm(fsm, operator)
+    while fsm.episode_step < fsm.flight_start_step:
+        _control_step(fsm)
+    if fault_kind == "operator":
+        operator.abort = True
+    elif fault_kind == "stale":
+        robot.feedback_stale = True
+    elif fault_kind == "deadline":
+        robot.control_deadline_missed = True
+    elif fault_kind == "tilt":
+        robot.imu_quaternion = _quaternion_from_roll_pitch(math.radians(50.0), 0.0)
+    elif fault_kind == "joint_and_deadline":
+        robot.joint_limit_violations[0] = True
+        robot.control_deadline_missed = True
+    else:
+        raise AssertionError(f"unknown fault kind {fault_kind}")
+    _control_step(fsm)
+    operator.abort = False
+    robot.feedback_stale = False
+    robot.control_deadline_missed = False
+    robot.joint_limit_violations[0] = False
+    robot.imu_quaternion = _quaternion_from_roll_pitch(0.0, 0.0)
+    while fsm.state is JumpControllerState.JUMP:
+        _control_step(fsm)
+
+    assert fsm.state is JumpControllerState.DAMPING
+    assert fsm.latched_abort_reasons == expected_reasons
+    assert "terminal" in (fsm.last_report or "")
+
+
+def test_joint_limit_abort_margin_warns_for_touch_then_aborts_beyond_margin(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    operator = _FakeOperator()
+    fsm = JumpControllerFSM(
+        manifest_path,
+        robot,
+        operator,
+        _ZeroPolicy(),
+        config=replace(
+            controller_config,
+            contact_safety_mode=JumpControllerConfig.ContactSafetyMode.UNMEASURED_GROUND,
+            joint_limit_abort_margin_rad=0.02,
+        ),
+    )
+    _prepare_armed(fsm, operator)
+    _confirm(fsm, operator)
+    while fsm.episode_step < fsm.flight_start_step:
+        _control_step(fsm)
+    robot.follow_commands = False
+    robot.joint_positions[3] = -2.0003
+    robot.joint_limit_violations[3] = True
+
+    _control_step(fsm)
+
+    assert not fsm.abort_latched
+    assert fsm.joint_limit_touches == {"left_knee_joint": pytest.approx(0.0003)}
+    assert fsm.drain_warnings() == (
+        "WARNING: joint limit touched within abort margin: left_knee_joint depth=0.000300 rad "
+        "(margin=0.020000 rad); continuing.",
+    )
+
+    robot.joint_positions[3] = -2.0201
+    _control_step(fsm)
+
+    assert fsm.abort_latched
+    assert fsm.latched_abort_reasons == {"joint limit exceeded"}
+
+
+@pytest.mark.parametrize("margin", (-0.01, math.inf, math.nan))
+def test_joint_limit_abort_margin_must_be_finite_and_non_negative(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+    margin: float,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    with pytest.raises(ValueError, match="joint_limit_abort_margin_rad"):
+        JumpControllerFSM(
+            manifest_path,
+            _FakeRobot(default_position),
+            _FakeOperator(),
+            _ZeroPolicy(),
+            config=replace(controller_config, joint_limit_abort_margin_rad=margin),
+        )
+
+
+def test_joint_limit_abort_margin_requires_manifest_limits_but_default_remains_compatible(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["joints"]["position_limits"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    JumpControllerFSM(
+        manifest_path,
+        _FakeRobot(default_position),
+        _FakeOperator(),
+        _ZeroPolicy(),
+        config=controller_config,
+    )
+    with pytest.raises(ValueError, match="requires manifest joints.position_limits"):
+        JumpControllerFSM(
+            manifest_path,
+            _FakeRobot(default_position),
+            _FakeOperator(),
+            _ZeroPolicy(),
+            config=replace(controller_config, joint_limit_abort_margin_rad=0.02),
+        )
 
 
 def test_contact_safety_mode_requires_enum(

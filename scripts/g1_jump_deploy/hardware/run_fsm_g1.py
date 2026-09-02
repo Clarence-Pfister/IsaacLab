@@ -3,9 +3,11 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Run read-only policy preflight, stand control, or a contactless gantry rehearsal.
+"""Run read-only preflight, guarded stand control, or an explicitly authorized jump mode.
 
-No mode in this module authorizes a ground jump without measured foot contact.
+Ground jumping is available only through the fail-closed ``--ground_jump``
+contract. G1 supplies no foot-contact measurement, so touchdown cannot be
+detected and a post-takeoff abort can only latch until the policy episode ends.
 """
 
 from __future__ import annotations
@@ -14,6 +16,7 @@ import argparse
 import hashlib
 import json
 import math
+import queue
 import socket
 import sys
 import threading
@@ -93,6 +96,23 @@ _NATIVE_HANDOFF_SETTLE_DURATION_S = 1.0
 _NATIVE_HANDOFF_MAX_POSITION_ERROR_RAD = 0.15
 _GANTRY_REHEARSAL_MIN_DURATION_S = 15.0
 _GANTRY_REHEARSAL_MAX_EFFORT_SCALE = 0.1
+_GROUND_JUMP_MIN_DURATION_S = 20.0
+_GROUND_JUMP_MAX_DURATION_S = 60.0
+_GROUND_JUMP_MAX_EFFORT_SCALE = 0.6
+_GROUND_STAND_STIFFNESS = 200.0
+_GROUND_STAND_DAMPING = 5.0
+_GROUND_STAND_ANKLE_STIFFNESS = 80.0
+_GROUND_STAND_ANKLE_DAMPING = 7.0
+_GROUND_STAND_ENTRY_DURATION_S = 1.0
+_GROUND_SETTLE_DURATION_S = 0.5
+_GROUND_SETTLE_TIMEOUT_S = 4.0
+_GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S = 0.05
+_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD = 0.02
+_GROUND_BALANCE_INITIAL_ROLL_INTEGRAL = 0.0
+_GROUND_BALANCE_INITIAL_PITCH_INTEGRAL = 0.2
+_GROUND_STAND_PREPARED_JOINTS = tuple(
+    f"{side}_{joint}_joint" for side in ("left", "right") for joint in ("hip_pitch", "knee")
+)
 _EXPECTED_SHADOW_STEPS = 152
 _EXPECTED_SHADOW_GOALS_X = (-0.1, 0.0, 0.1)
 _REMOTE_A_MASK = 0x01
@@ -131,6 +151,8 @@ class HardwareManifest:
         stiffness: Manifest position gains [N·m/rad].
         damping: Manifest damping gains [N·m·s/rad].
         initial_root_height: Reference pelvis height above the floor [m].
+        reference_root_quaternion_wxyz: Reference world-from-pelvis attitude in
+            WXYZ order.
         policy_dt: FSM period [s].
         effort_limit_ratio: Optional manifest PD torque-envelope ratios.
         lower_limit_velocity_lookahead: Optional lower-limit braking lookahead [s].
@@ -148,6 +170,7 @@ class HardwareManifest:
     stiffness: np.ndarray
     damping: np.ndarray
     initial_root_height: float
+    reference_root_quaternion_wxyz: np.ndarray
     policy_dt: float
     effort_limit_ratio: np.ndarray | None = None
     lower_limit_velocity_lookahead: np.ndarray | None = None
@@ -173,6 +196,61 @@ class FeedbackSnapshot:
     imu_gyroscope: np.ndarray
     wireless_remote: bytes
     maximum_temperature_c: int
+
+
+@dataclass(frozen=True)
+class FeedbackLimits:
+    """Fast feedback interlock limits used by :func:`_feedback_fault`.
+
+    Attributes:
+        feedback_timeout_s: Maximum feedback age [s].
+        body_tilt_limit_rad: Maximum absolute body tilt [rad].
+        base_angular_speed_limit_rad_s: Maximum base angular speed [rad/s].
+        joint_speed_limit_rad_s: Scalar or per-joint speed limits [rad/s].
+        joint_position_margin_rad: Allowed position beyond physical limits [rad].
+        maximum_motor_temperature_c: Maximum reported motor temperature [degC].
+    """
+
+    feedback_timeout_s: float = _FEEDBACK_TIMEOUT_S
+    body_tilt_limit_rad: float = _MAX_TILT_RAD
+    base_angular_speed_limit_rad_s: float = _MAX_BASE_ANGULAR_SPEED_RAD_S
+    joint_speed_limit_rad_s: float | np.ndarray = _MAX_JOINT_SPEED_RAD_S
+    joint_position_margin_rad: float = 0.0
+    maximum_motor_temperature_c: int = _MAX_MOTOR_TEMPERATURE_C
+
+
+def _ground_dynamic_feedback_limits(manifest: HardwareManifest) -> FeedbackLimits:
+    """Return the dynamic JUMP/SETTLE feedback envelope for ground validation."""
+    return FeedbackLimits(
+        body_tilt_limit_rad=math.radians(45.0),
+        base_angular_speed_limit_rad_s=12.0,
+        joint_speed_limit_rad_s=1.25 * manifest.velocity_limit,
+        joint_position_margin_rad=0.02,
+    )
+
+
+def _ground_stand_configuration(
+    manifest: HardwareManifest,
+) -> tuple[StandGainConfig, BalanceControllerConfig]:
+    """Build the validated ground-STAND gain and balance configuration."""
+    missing_joints = sorted(set(_GROUND_STAND_PREPARED_JOINTS).difference(manifest.joint_names))
+    if missing_joints:
+        raise ValueError(f"Ground STAND manifest is missing prepared joints: {missing_joints}")
+    target_roll, target_pitch = quaternion_to_roll_pitch(manifest.reference_root_quaternion_wxyz)
+    stand_gains = StandGainConfig(
+        ankle_stiffness=_GROUND_STAND_ANKLE_STIFFNESS,
+        ankle_damping=_GROUND_STAND_ANKLE_DAMPING,
+        stiffness_overrides={name: _GROUND_STAND_STIFFNESS for name in _GROUND_STAND_PREPARED_JOINTS},
+        damping_overrides={name: _GROUND_STAND_DAMPING for name in _GROUND_STAND_PREPARED_JOINTS},
+    )
+    balance_config = BalanceControllerConfig(
+        target_roll=target_roll,
+        target_pitch=target_pitch,
+        integral_enabled=True,
+        initial_roll_integral=_GROUND_BALANCE_INITIAL_ROLL_INTEGRAL,
+        initial_pitch_integral=_GROUND_BALANCE_INITIAL_PITCH_INTEGRAL,
+    )
+    return stand_gains, balance_config
 
 
 @dataclass(frozen=True)
@@ -278,6 +356,13 @@ class _RehearsalRecorder:
         manifest: HardwareManifest,
         goal: JumpGoal,
         effort_scale: float,
+        *,
+        mode: str = "contactless_gantry_policy_rehearsal",
+        ground_jump_authorized: bool = False,
+        feet_required_ground_clear: bool = True,
+        target_rate_limit_rad_s: float | None = _TARGET_RATE_LIMIT_RAD_S,
+        rehearsal_effort_scale_override: float | None = None,
+        rehearsal_unlimited_slew: bool = False,
     ):
         self.log_path = log_path.resolve()
         if self.log_path.exists():
@@ -288,6 +373,12 @@ class _RehearsalRecorder:
         self._manifest = manifest
         self._goal = goal
         self._effort_scale = effort_scale
+        self._mode = mode
+        self._ground_jump_authorized = ground_jump_authorized
+        self._feet_required_ground_clear = feet_required_ground_clear
+        self._target_rate_limit_rad_s = target_rate_limit_rad_s
+        self._rehearsal_effort_scale_override = rehearsal_effort_scale_override
+        self._rehearsal_unlimited_slew = rehearsal_unlimited_slew
         self._created_unix_time_s = time.time()
         self._published_at: list[float] = []
         self._feedback_received_at: list[float] = []
@@ -307,6 +398,8 @@ class _RehearsalRecorder:
         self._command_stiffness: list[np.ndarray] = []
         self._command_damping: list[np.ndarray] = []
         self._balance_offsets: list[np.ndarray] = []
+        self._ratio_envelope_position_bound_counts = np.zeros(manifest.joint_count, dtype=np.int64)
+        self._ratio_envelope_position_bound_maximum_excess = np.zeros(manifest.joint_count, dtype=np.float64)
 
     @property
     def sample_count(self) -> int:
@@ -342,6 +435,8 @@ class _RehearsalRecorder:
         self._balance_offsets.append(
             _finite_vector(balance_offset, self._manifest.joint_count, "audit balance offset").copy()
         )
+        self._ratio_envelope_position_bound_counts = robot.ratio_envelope_position_bound_counts
+        self._ratio_envelope_position_bound_maximum_excess = robot.ratio_envelope_position_bound_maximum_excess
 
     def write(self, success: bool, reason: str, state_buffer: _StateBuffer) -> None:
         """Create the immutable NPZ audit, including failed attempts."""
@@ -354,12 +449,12 @@ class _RehearsalRecorder:
 
         metadata = {
             "schema_version": "1.0",
-            "mode": "contactless_gantry_policy_rehearsal",
+            "mode": self._mode,
             "control_result": "pass" if success else "stopped",
             "reason": reason,
-            "ground_jump_authorized": False,
+            "ground_jump_authorized": self._ground_jump_authorized,
             "contact_sensor_available": False,
-            "feet_required_ground_clear": True,
+            "feet_required_ground_clear": self._feet_required_ground_clear,
             "created_unix_time_s": self._created_unix_time_s,
             "written_unix_time_s": time.time(),
             "manifest_path": str(self._manifest_path),
@@ -377,7 +472,16 @@ class _RehearsalRecorder:
                 "pitch": self._goal.pitch,
             },
             "effort_scale": self._effort_scale,
-            "target_rate_limit_rad_s": _TARGET_RATE_LIMIT_RAD_S,
+            "target_rate_limit_rad_s": (
+                {
+                    "stand": _TARGET_RATE_LIMIT_RAD_S,
+                    "armed": _TARGET_RATE_LIMIT_RAD_S,
+                    "jump": None,
+                    "settle": None,
+                }
+                if self._rehearsal_unlimited_slew
+                else self._target_rate_limit_rad_s
+            ),
             "policy_dt_s": self._manifest.policy_dt,
             "command_dt_s": _FAST_DT,
             "command_samples": count,
@@ -386,7 +490,34 @@ class _RehearsalRecorder:
                 "crc_errors": int(state_buffer.crc_errors),
                 "invalid_packets": int(state_buffer.invalid_packets),
             },
+            "ratio_envelope_exceeded_by_position_bound": {
+                "total_count": int(np.sum(self._ratio_envelope_position_bound_counts)),
+                "per_joint_count": {
+                    name: int(count)
+                    for name, count in zip(
+                        self._manifest.joint_names,
+                        self._ratio_envelope_position_bound_counts,
+                        strict=True,
+                    )
+                    if count > 0
+                },
+                "per_joint_maximum_excess_nm": {
+                    name: float(excess)
+                    for name, excess in zip(
+                        self._manifest.joint_names,
+                        self._ratio_envelope_position_bound_maximum_excess,
+                        strict=True,
+                    )
+                    if excess > 0.0
+                },
+            },
         }
+        if self._rehearsal_effort_scale_override is not None or self._rehearsal_unlimited_slew:
+            metadata["rehearsal_escalation"] = {
+                "effort_scale_override": self._rehearsal_effort_scale_override,
+                "unlimited_slew": self._rehearsal_unlimited_slew,
+            }
+        self._extend_metadata(metadata)
         published_at = np.asarray(self._published_at, dtype=np.float64)
         feedback_received_at = np.asarray(self._feedback_received_at, dtype=np.float64)
         command_target = joint_matrix(self._command_targets)
@@ -422,9 +553,174 @@ class _RehearsalRecorder:
                     estimated_command_torque=estimated_command_torque,
                     balance_offset=joint_matrix(self._balance_offsets),
                     metadata_json=np.asarray(json.dumps(metadata, sort_keys=True)),
+                    **self._extra_arrays(),
                 )
         except OSError as exc:
             raise ValueError(f"Cannot create rehearsal log {self.log_path}: {exc}") from exc
+
+    def _extend_metadata(self, metadata: dict[str, Any]) -> None:
+        """Add mode-specific metadata before the audit is written."""
+
+    def _extra_arrays(self) -> dict[str, np.ndarray]:
+        """Return mode-specific NPZ arrays."""
+        return {}
+
+
+class _GroundJumpRecorder(_RehearsalRecorder):
+    """Collect an immutable command audit with per-jump outcome summaries."""
+
+    def __init__(
+        self,
+        log_path: Path,
+        manifest_path: Path,
+        policy_path: Path,
+        admission_path: Path,
+        manifest: HardwareManifest,
+        effort_scale: float,
+        stand_gains: StandGainConfig,
+        balance_config: BalanceControllerConfig,
+        stand_entry_duration_s: float,
+        policy_stand_after_jump: bool,
+        settle_duration_s: float,
+        settle_timeout_s: float,
+        settle_joint_velocity_tolerance_rad_s: float,
+        joint_limit_abort_margin_rad: float,
+    ):
+        super().__init__(
+            log_path,
+            manifest_path,
+            policy_path,
+            admission_path,
+            manifest,
+            JumpGoal(0.0, 0.0, 0.0),
+            effort_scale,
+            mode="unmeasured_ground_jump",
+            ground_jump_authorized=True,
+            feet_required_ground_clear=False,
+        )
+        self._jump_records: list[dict[str, Any]] = []
+        self._active_jump: dict[str, Any] | None = None
+        self._previous_fsm_state: JumpControllerState | None = None
+        self._maximum_joint_speed_fractions: list[float] = []
+        self._body_tilts_rad: list[float] = []
+        self._stand_gains = stand_gains
+        self._balance_config = balance_config
+        self._stand_entry_duration_s = stand_entry_duration_s
+        self._policy_stand_after_jump = policy_stand_after_jump
+        self._settle_duration_s = settle_duration_s
+        self._settle_timeout_s = settle_timeout_s
+        self._settle_joint_velocity_tolerance_rad_s = settle_joint_velocity_tolerance_rad_s
+        self._joint_limit_abort_margin_rad = joint_limit_abort_margin_rad
+
+    def record(self, robot: _G1Robot, fsm: JumpControllerFSM, balance_offset: np.ndarray) -> None:
+        """Record one command and update the active jump summary."""
+        super().record(robot, fsm, balance_offset)
+        state = fsm.state
+        command = robot.last_published_command
+        if command is None:
+            raise RuntimeError("cannot audit ground feedback without a published command")
+        self._maximum_joint_speed_fractions.append(
+            float(np.max(np.abs(command.feedback.joint_velocities) / self._manifest.velocity_limit))
+        )
+        self._body_tilts_rad.append(_body_tilt(command.feedback.imu_quaternion))
+        if state is JumpControllerState.JUMP and self._previous_fsm_state is not JumpControllerState.JUMP:
+            goal = fsm.latched_goal
+            self._active_jump = {
+                "goal": None
+                if goal is None
+                else {
+                    "pos_x": goal.dx,
+                    "pos_y": goal.dy,
+                    "yaw": goal.dyaw,
+                    "roll": goal.roll,
+                    "pitch": goal.pitch,
+                },
+                "start_policy_step": max(int(fsm.episode_step) - 1, 0),
+                "end_policy_step": None,
+                "outcome": "in_progress",
+                "latched_abort_reason": None,
+                "latched_abort_reasons": [],
+                "max_tilt_rad": 0.0,
+                "max_estimated_torque_fraction": 0.0,
+                "joint_limit_touches_rad": {},
+            }
+        if self._active_jump is not None:
+            command = robot.last_published_command
+            if command is not None:
+                tilt = _body_tilt(command.feedback.imu_quaternion)
+                estimated_torque = command.stiffness * (command.target - command.feedback.joint_positions) - (
+                    command.damping * command.feedback.joint_velocities
+                )
+                torque_fraction = float(np.max(np.abs(estimated_torque) / self._manifest.effort_limit))
+                self._active_jump["max_tilt_rad"] = max(self._active_jump["max_tilt_rad"], tilt)
+                self._active_jump["max_estimated_torque_fraction"] = max(
+                    self._active_jump["max_estimated_torque_fraction"], torque_fraction
+                )
+            self._active_jump["latched_abort_reason"] = fsm.latched_abort_reason
+            self._active_jump["latched_abort_reasons"] = sorted(getattr(fsm, "latched_abort_reasons", ()))
+            touch_depths = np.maximum(
+                self._manifest.joint_position_lower - command.feedback.joint_positions,
+                command.feedback.joint_positions - self._manifest.joint_position_upper,
+            )
+            touch_records = self._active_jump["joint_limit_touches_rad"]
+            for index in np.flatnonzero((touch_depths >= 0.0) & (touch_depths <= self._joint_limit_abort_margin_rad)):
+                name = self._manifest.joint_names[int(index)]
+                touch_records[name] = max(touch_records.get(name, 0.0), float(touch_depths[index]))
+            for name, depth in fsm.joint_limit_touches.items():
+                touch_records[name] = max(touch_records.get(name, 0.0), depth)
+            if state in (JumpControllerState.STAND, JumpControllerState.DAMPING, JumpControllerState.FAULT):
+                self._finish_jump(fsm)
+        self._previous_fsm_state = state
+
+    def _finish_jump(self, fsm: JumpControllerFSM) -> None:
+        if self._active_jump is None:
+            return
+        self._active_jump["end_policy_step"] = int(fsm.episode_step)
+        self._active_jump["outcome"] = (
+            "latched_abort_settled"
+            if fsm.abort_latched and fsm.state is JumpControllerState.STAND
+            else ("completed_stand" if fsm.state is JumpControllerState.STAND else f"entered_{fsm.state.value.lower()}")
+        )
+        self._jump_records.append(self._active_jump)
+        self._active_jump = None
+
+    def _extend_metadata(self, metadata: dict[str, Any]) -> None:
+        if self._active_jump is not None:
+            self._active_jump["outcome"] = "session_ended_during_jump"
+            self._jump_records.append(self._active_jump)
+            self._active_jump = None
+        metadata["jumps"] = self._jump_records
+        metadata["target_rate_limit_rad_s"] = {
+            "stand": _TARGET_RATE_LIMIT_RAD_S,
+            "goto_start": _TARGET_RATE_LIMIT_RAD_S,
+            "armed": _TARGET_RATE_LIMIT_RAD_S,
+            "jump": None,
+            "settle": None,
+        }
+        metadata["ground_stand_controller"] = {
+            "ankle_stiffness_nm_per_rad": self._stand_gains.ankle_stiffness,
+            "ankle_damping_nm_s_per_rad": self._stand_gains.ankle_damping,
+            "stiffness_overrides_nm_per_rad": dict(self._stand_gains.stiffness_overrides or {}),
+            "damping_overrides_nm_s_per_rad": dict(self._stand_gains.damping_overrides or {}),
+            "balance_target_roll_rad": self._balance_config.target_roll,
+            "balance_target_pitch_rad": self._balance_config.target_pitch,
+            "balance_integral_enabled": self._balance_config.integral_enabled,
+            "balance_initial_roll_integral_rad_s": self._balance_config.initial_roll_integral,
+            "balance_initial_pitch_integral_rad_s": self._balance_config.initial_pitch_integral,
+            "stand_entry_duration_s": self._stand_entry_duration_s,
+            "balance_target_entry_duration_s": self._stand_entry_duration_s,
+            "policy_stand_after_jump": self._policy_stand_after_jump,
+            "settle_duration_s": self._settle_duration_s,
+            "settle_timeout_s": self._settle_timeout_s,
+            "settle_joint_velocity_tolerance_rad_s": self._settle_joint_velocity_tolerance_rad_s,
+            "joint_limit_abort_margin_rad": self._joint_limit_abort_margin_rad,
+        }
+
+    def _extra_arrays(self) -> dict[str, np.ndarray]:
+        return {
+            "maximum_joint_speed_fraction": np.asarray(self._maximum_joint_speed_fractions, dtype=np.float64),
+            "body_tilt_rad": np.asarray(self._body_tilts_rad, dtype=np.float64),
+        }
 
 
 def _finite_vector(value: Any, length: int, name: str) -> np.ndarray:
@@ -432,6 +728,21 @@ def _finite_vector(value: Any, length: int, name: str) -> np.ndarray:
     if result.shape != (length,) or not np.all(np.isfinite(result)):
         raise ValueError(f"{name} must contain {length} finite numbers")
     return result
+
+
+def _load_reference_root(reference: dict[str, Any]) -> tuple[float, np.ndarray]:
+    """Load the reference pelvis height and WXYZ attitude from the manifest."""
+    root_frame0 = reference.get("root_frame0")
+    if not isinstance(root_frame0, dict):
+        raise ValueError("reference.root_frame0 must be an object")
+    initial_root_position = _finite_vector(root_frame0.get("pos"), 3, "reference.root_frame0.pos")
+    initial_root_height = float(initial_root_position[2])
+    if initial_root_height <= 0.0:
+        raise ValueError("reference.root_frame0.pos[2] must be positive")
+    quaternion_xyzw = _finite_vector(root_frame0.get("quat_xyzw"), 4, "reference.root_frame0.quat_xyzw")
+    if not math.isclose(float(np.linalg.norm(quaternion_xyzw)), 1.0, rel_tol=0.0, abs_tol=1.0e-6):
+        raise ValueError("reference.root_frame0.quat_xyzw must be a unit quaternion")
+    return initial_root_height, np.roll(quaternion_xyzw, 1)
 
 
 def _load_hardware_manifest(path: Path) -> HardwareManifest:
@@ -562,13 +873,7 @@ def _load_hardware_manifest(path: Path) -> HardwareManifest:
             raise ValueError("Lower-limit brake formula is unsupported")
     else:
         raise ValueError("action.lower_limit_brake.type must be velocity_lookahead")
-    root_frame0 = reference.get("root_frame0")
-    if not isinstance(root_frame0, dict):
-        raise ValueError("reference.root_frame0 must be an object")
-    initial_root_position = _finite_vector(root_frame0.get("pos"), 3, "reference.root_frame0.pos")
-    initial_root_height = float(initial_root_position[2])
-    if initial_root_height <= 0.0:
-        raise ValueError("reference.root_frame0.pos[2] must be positive")
+    initial_root_height, reference_root_quaternion_wxyz = _load_reference_root(reference)
     policy_dt = control.get("policy_dt")
     if (
         isinstance(policy_dt, bool)
@@ -597,6 +902,7 @@ def _load_hardware_manifest(path: Path) -> HardwareManifest:
         stiffness=stiffness,
         damping=damping,
         initial_root_height=initial_root_height,
+        reference_root_quaternion_wxyz=reference_root_quaternion_wxyz,
         policy_dt=float(policy_dt),
         effort_limit_ratio=effort_limit_ratio,
         lower_limit_velocity_lookahead=lower_limit_velocity_lookahead,
@@ -1302,37 +1608,49 @@ def _body_tilt(quaternion_wxyz: np.ndarray) -> float:
     return math.acos(float(np.clip(1.0 - 2.0 * (x * x + y * y), -1.0, 1.0)))
 
 
-def _feedback_fault(snapshot: FeedbackSnapshot, manifest: HardwareManifest, now: float) -> str | None:
+def _feedback_fault(
+    snapshot: FeedbackSnapshot,
+    manifest: HardwareManifest,
+    now: float,
+    limits: FeedbackLimits = FeedbackLimits(),
+) -> str | None:
     """Return a feedback interlock reason, or ``None`` when feedback is safe."""
     age_s = now - snapshot.received_at
-    if not math.isfinite(age_s) or age_s < 0.0 or age_s > _FEEDBACK_TIMEOUT_S:
+    if not math.isfinite(age_s) or age_s < 0.0 or age_s > limits.feedback_timeout_s:
         return f"feedback stale for {age_s * 1000.0:.1f} ms"
     try:
         body_tilt = _body_tilt(snapshot.imu_quaternion)
     except ValueError as exc:
         return f"invalid IMU feedback: {exc}"
-    if body_tilt > _MAX_TILT_RAD:
-        return "body tilt exceeded 20 degrees"
+    if body_tilt > limits.body_tilt_limit_rad:
+        return f"body tilt exceeded {math.degrees(limits.body_tilt_limit_rad):g} degrees"
     maximum_angular_speed = float(np.max(np.abs(snapshot.imu_gyroscope)))
-    if maximum_angular_speed > _MAX_BASE_ANGULAR_SPEED_RAD_S:
+    if maximum_angular_speed > limits.base_angular_speed_limit_rad_s:
         return (
             f"base angular speed reached {maximum_angular_speed:.2f} rad/s and exceeded "
-            f"{_MAX_BASE_ANGULAR_SPEED_RAD_S:.2f} rad/s"
+            f"{limits.base_angular_speed_limit_rad_s:.2f} rad/s"
         )
-    maximum_speed_index = int(np.argmax(np.abs(snapshot.joint_velocities)))
+    raw_speed_limits = np.asarray(limits.joint_speed_limit_rad_s, dtype=np.float64)
+    speed_limits = (
+        np.full(manifest.joint_count, float(raw_speed_limits), dtype=np.float64)
+        if raw_speed_limits.ndim == 0
+        else _finite_vector(raw_speed_limits, manifest.joint_count, "joint speed limits")
+    )
+    speed_fractions = np.abs(snapshot.joint_velocities) / speed_limits
+    maximum_speed_index = int(np.argmax(speed_fractions))
     maximum_speed = float(abs(snapshot.joint_velocities[maximum_speed_index]))
-    if maximum_speed > _MAX_JOINT_SPEED_RAD_S:
+    if speed_fractions[maximum_speed_index] > 1.0:
         return (
             f"joint speed for {manifest.joint_names[maximum_speed_index]} reached "
             f"{maximum_speed:.2f} rad/s and exceeded "
-            f"{_MAX_JOINT_SPEED_RAD_S:.2f} rad/s"
+            f"{speed_limits[maximum_speed_index]:.2f} rad/s"
         )
-    if np.any(snapshot.joint_positions < manifest.joint_position_lower) or np.any(
-        snapshot.joint_positions > manifest.joint_position_upper
+    if np.any(snapshot.joint_positions < manifest.joint_position_lower - limits.joint_position_margin_rad) or np.any(
+        snapshot.joint_positions > manifest.joint_position_upper + limits.joint_position_margin_rad
     ):
         return "a measured joint position exceeded the manifest physical limits"
-    if snapshot.maximum_temperature_c > _MAX_MOTOR_TEMPERATURE_C:
-        return f"motor temperature {snapshot.maximum_temperature_c} C exceeded {_MAX_MOTOR_TEMPERATURE_C} C"
+    if snapshot.maximum_temperature_c > limits.maximum_motor_temperature_c:
+        return f"motor temperature {snapshot.maximum_temperature_c} C exceeded {limits.maximum_motor_temperature_c} C"
     return None
 
 
@@ -1488,6 +1806,100 @@ class _GantryRehearsalOperator(_StandOperator):
         self.request_start = _remote_a_pressed(wireless_remote)
         self.confirm = _remote_y_pressed(wireless_remote)
 
+    def set_goal(self, goal: JumpGoal | None) -> None:
+        """Set the goal offered to the FSM on the next A rising edge."""
+        self.pending_goal = goal
+
+
+class _InteractiveGoalReader:
+    """Read one interactive goal on a background thread without blocking control."""
+
+    _EOF = object()
+
+    def __init__(self, input_stream: Any | None = None):
+        self._input_stream = sys.stdin if input_stream is None else input_stream
+        self._results: queue.Queue[str | object] = queue.Queue(maxsize=1)
+        self._thread: threading.Thread | None = None
+        self._eof = False
+
+    @property
+    def pending(self) -> bool:
+        """Whether an input request is currently outstanding."""
+        return self._thread is not None
+
+    @property
+    def eof(self) -> bool:
+        """Whether stdin reported that no interactive input is available."""
+        return self._eof
+
+    def request(self, prompt: str = "NEXT GOAL dx [m] (or q):") -> None:
+        """Print the prompt and begin one background line read."""
+        if self.eof:
+            raise RuntimeError("interactive input is unavailable after stdin EOF")
+        if self.pending:
+            raise RuntimeError("an interactive goal request is already pending")
+        print(prompt, end=" ", flush=True)
+        self._thread = threading.Thread(target=self._read_line, name="g1-ground-goal-reader", daemon=True)
+        self._thread.start()
+
+    def poll(self) -> str | None:
+        """Return the completed stripped line, or ``None`` without waiting."""
+        try:
+            result = self._results.get_nowait()
+        except queue.Empty:
+            return None
+        self._thread = None
+        if result is self._EOF:
+            self._eof = True
+            print("STDIN EOF: no interactive input available; interactive goal prompts disabled.")
+            return None
+        if not isinstance(result, str):
+            raise RuntimeError("interactive goal reader returned an invalid result")
+        return result
+
+    def _read_line(self) -> None:
+        try:
+            line = self._input_stream.readline()
+        except Exception:
+            line = ""
+        self._results.put(line.strip() if line else self._EOF)
+
+
+def _parse_ground_goal(value: str, pos_x_range: tuple[float, float]) -> JumpGoal:
+    """Parse and range-check one longitudinal ground-jump goal."""
+    try:
+        dx = float(value)
+    except ValueError as exc:
+        raise ValueError(f"ground goal {value!r} is not a number") from exc
+    if not math.isfinite(dx):
+        raise ValueError("ground goal must be finite")
+    lower, upper = pos_x_range
+    if not lower <= dx <= upper:
+        raise ValueError(f"ground goal dx={dx:g} is outside manifest pos_x range [{lower:g}, {upper:g}]")
+    return JumpGoal(dx, 0.0, 0.0, roll=0.0, pitch=0.0)
+
+
+def _manifest_ground_goal_range(path: Path) -> tuple[float, float]:
+    """Load the longitudinal goal range needed for ground-mode CLI admission."""
+    try:
+        with path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        ranges = manifest["goal"]["ranges"]
+        raw_range = ranges["pos_x"]
+        lower, upper = (float(raw_range[0]), float(raw_range[1]))
+    except (OSError, KeyError, TypeError, ValueError, IndexError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Cannot read manifest goal.ranges.pos_x from {path}: {exc}") from exc
+    if not math.isfinite(lower) or not math.isfinite(upper) or lower > upper:
+        raise ValueError("manifest goal.ranges.pos_x must be a finite increasing range")
+    for name in ("pos_y", "yaw", "roll", "pitch"):
+        try:
+            fixed_lower, fixed_upper = (float(ranges[name][0]), float(ranges[name][1]))
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise ValueError(f"manifest goal.ranges.{name} must contain zero") from exc
+        if not math.isfinite(fixed_lower) or not math.isfinite(fixed_upper) or not fixed_lower <= 0.0 <= fixed_upper:
+            raise ValueError(f"manifest goal.ranges.{name} does not allow the ground-mode fixed value zero")
+    return lower, upper
+
 
 class _InactivePolicy:
     def __call__(self, observation: np.ndarray) -> np.ndarray:
@@ -1520,6 +1932,8 @@ class _G1Robot:
         self.peak_damping_torque = np.zeros(manifest.joint_count, dtype=np.float64)
         self.peak_position_error = np.zeros(manifest.joint_count, dtype=np.float64)
         self.peak_joint_velocity = np.zeros(manifest.joint_count, dtype=np.float64)
+        self._ratio_envelope_position_bound_counts = np.zeros(manifest.joint_count, dtype=np.int64)
+        self._ratio_envelope_position_bound_maximum_excess = np.zeros(manifest.joint_count, dtype=np.float64)
 
     def _snapshot(self) -> FeedbackSnapshot:
         snapshot = self._state_buffer.snapshot()
@@ -1616,6 +2030,18 @@ class _G1Robot:
             damping=command.damping.copy(),
         )
 
+    @property
+    def ratio_envelope_position_bound_counts(self) -> np.ndarray:
+        """Per-joint count of bounded commands exceeding the scaled effort envelope."""
+
+        return self._ratio_envelope_position_bound_counts.copy()
+
+    @property
+    def ratio_envelope_position_bound_maximum_excess(self) -> np.ndarray:
+        """Maximum per-joint scaled-envelope excess caused by target bounds [N·m]."""
+
+        return self._ratio_envelope_position_bound_maximum_excess.copy()
+
     def command_joint_position_target(
         self,
         target: np.ndarray,
@@ -1642,6 +2068,7 @@ class _G1Robot:
         effort_scale: float,
         *,
         target_rate_limit_rad_s: float | None = _TARGET_RATE_LIMIT_RAD_S,
+        feedback_limits: FeedbackLimits = FeedbackLimits(),
     ) -> None:
         """Publish one guarded, torque-limited user command.
 
@@ -1652,10 +2079,11 @@ class _G1Robot:
             target_rate_limit_rad_s: Optional joint-target slew limit [rad/s].
                 ``None`` retains the policy target dynamics while the torque
                 projection remains active.
+            feedback_limits: Feedback interlock envelope for this publication.
         """
         snapshot = self._snapshot()
         now = time.monotonic()
-        feedback_fault = _feedback_fault(snapshot, self._manifest, now)
+        feedback_fault = _feedback_fault(snapshot, self._manifest, now, feedback_limits)
         if feedback_fault is not None:
             raise SafetyFault(feedback_fault)
         if self._last_publish_time is not None:
@@ -1747,15 +2175,33 @@ class _G1Robot:
         bounded_position_error = command_target - snapshot.joint_positions
         bounded_position_torque = self._stiffness * bounded_position_error
         bounded_estimated_torque = bounded_position_torque + damping_torque
-        if np.any(np.abs(bounded_estimated_torque) > effort_limit + 1.0e-9):
-            joint_index = int(np.argmax(np.abs(bounded_estimated_torque) / effort_limit))
+        bounded_torque_magnitude = np.abs(bounded_estimated_torque)
+        if np.any(bounded_torque_magnitude > self._manifest.effort_limit + 1.0e-9):
+            joint_index = int(np.argmax(bounded_torque_magnitude / self._manifest.effort_limit))
             raise SafetyFault(
-                f"target bounds cannot satisfy the torque envelope for "
+                f"target bounds exceed the physical torque limit for "
                 f"{self._manifest.joint_names[joint_index]}: "
                 f"{bounded_estimated_torque[joint_index]:.2f} N m exceeds "
-                f"{effort_limit[joint_index]:.2f} N m"
+                f"{self._manifest.effort_limit[joint_index]:.2f} N m"
             )
+        ratio_excess = bounded_torque_magnitude - effort_limit
+        ratio_exceeded_by_bounds = ratio_excess > 1.0e-9
         self._write(snapshot, command_target, self._stiffness, self._damping)
+        for joint_index in np.flatnonzero(ratio_exceeded_by_bounds):
+            first_occurrence = self._ratio_envelope_position_bound_counts[joint_index] == 0
+            self._ratio_envelope_position_bound_counts[joint_index] += 1
+            self._ratio_envelope_position_bound_maximum_excess[joint_index] = max(
+                self._ratio_envelope_position_bound_maximum_excess[joint_index],
+                ratio_excess[joint_index],
+            )
+            if first_occurrence:
+                print(
+                    "WARNING: ratio envelope exceeded by position bound for "
+                    f"{self._manifest.joint_names[joint_index]}: excess={ratio_excess[joint_index]:.2f} N m; "
+                    f"bounded torque={bounded_estimated_torque[joint_index]:+.2f} N m, "
+                    f"scaled limit={effort_limit[joint_index]:.2f} N m, "
+                    f"physical limit={self._manifest.effort_limit[joint_index]:.2f} N m."
+                )
         self._last_published_target = command_target
         self._last_publish_time = now
 
@@ -1808,7 +2254,77 @@ class _G1Robot:
         )
 
 
-def _parse_args() -> argparse.Namespace:
+def _validate_ground_jump_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Enforce the opt-in unmeasured ground-jump CLI contract."""
+    if not args.ground_jump:
+        args.ground_goals = ()
+        args.ground_goal_pos_x_range = None
+        if args.ground_log is not None:
+            parser.error("--ground_log requires --ground_jump")
+        if args.acknowledge_unmeasured_ground_jump:
+            parser.error("--acknowledge_unmeasured_ground_jump requires --ground_jump")
+        if args.goal_sequence is not None:
+            parser.error("--goal_sequence requires --ground_jump")
+        if args.interactive_goals:
+            parser.error("--interactive_goals requires --ground_jump")
+        return
+    if not args.enable_control:
+        parser.error("--ground_jump requires --enable_control")
+    if args.query_fsm:
+        parser.error("--ground_jump cannot be combined with --query_fsm")
+    if not args.acknowledge_unmeasured_ground_jump:
+        parser.error("--ground_jump requires --acknowledge_unmeasured_ground_jump")
+    if args.shadow_admission is None:
+        parser.error("--ground_jump requires --shadow_admission")
+    if args.ground_log is None:
+        parser.error("--ground_jump requires --ground_log")
+    if args.ground_log.exists():
+        parser.error(f"--ground_log already exists and will not be overwritten: {args.ground_log}")
+    if (
+        args.rehearsal_log is not None
+        or args.acknowledge_contactless_rehearsal
+        or args.rehearsal_effort_scale_override is not None
+        or args.rehearsal_unlimited_slew
+        or args.acknowledge_rehearsal_escalation
+    ):
+        parser.error("rehearsal-only options cannot be combined with --ground_jump")
+    if args.duration < _GROUND_JUMP_MIN_DURATION_S:
+        parser.error(f"--ground_jump requires --duration >= {_GROUND_JUMP_MIN_DURATION_S:.0f}")
+    if args.entry_mode not in ("native_stand", "passive"):
+        parser.error("--ground_jump requires --entry_mode native_stand or passive")
+    if args.exit_mode != "passive":
+        parser.error("--ground_jump requires --exit_mode passive")
+    if args.goal_sequence is None and not args.interactive_goals:
+        parser.error("--ground_jump requires --goal_sequence and/or --interactive_goals")
+    try:
+        args.ground_goal_pos_x_range = _manifest_ground_goal_range(args.manifest.resolve())
+    except ValueError as exc:
+        parser.error(str(exc))
+    raw_goals = [] if args.goal_sequence is None else args.goal_sequence.split(",")
+    if any(not value.strip() for value in raw_goals):
+        parser.error("--goal_sequence must contain comma-separated numeric goals without empty entries")
+    try:
+        args.ground_goals = tuple(
+            _parse_ground_goal(value.strip(), args.ground_goal_pos_x_range) for value in raw_goals
+        )
+    except ValueError as exc:
+        parser.error(str(exc))
+    try:
+        manifest = _load_hardware_manifest(args.manifest.resolve())
+    except ValueError as exc:
+        parser.error(str(exc))
+    effort_limit_ratio = 1.0 if manifest.effort_limit_ratio is None else float(np.min(manifest.effort_limit_ratio))
+    maximum_effort_scale = min(_GROUND_JUMP_MAX_EFFORT_SCALE, effort_limit_ratio)
+    if args.effort_scale > maximum_effort_scale:
+        parser.error(f"--ground_jump limits --effort_scale to {maximum_effort_scale:g}")
+    if any(
+        abs(getattr(args, name)) > 1.0e-12
+        for name in ("goal_pos_x", "goal_pos_y", "goal_yaw", "goal_roll", "goal_pitch")
+    ):
+        parser.error("--ground_jump requires the generic --goal_* options to remain zero")
+
+
+def _parse_args() -> argparse.Namespace:  # noqa: C901
     parser = argparse.ArgumentParser(
         description=(
             "Preflight G1 jump inference read-only, run guarded stand control, or run one "
@@ -1843,6 +2359,11 @@ def _parse_args() -> argparse.Namespace:
             "ground-clear; this is not a jump or ground-test mode."
         ),
     )
+    policy_mode.add_argument(
+        "--ground_jump",
+        action="store_true",
+        help="Run explicitly authorized sequential floor jumps without measured touchdown feedback.",
+    )
     parser.add_argument(
         "--shadow_log",
         type=Path,
@@ -1862,12 +2383,49 @@ def _parse_args() -> argparse.Namespace:
         help="New NPZ control audit required by --gantry_policy_rehearsal; existing files are refused.",
     )
     parser.add_argument(
+        "--ground_log",
+        type=Path,
+        default=None,
+        help="New immutable NPZ command audit required by --ground_jump; existing files are refused.",
+    )
+    parser.add_argument(
         "--acknowledge_contactless_rehearsal",
         action="store_true",
         help=(
             "Acknowledge that the robot has no foot-contact signal and that the rehearsal requires "
             "full mechanical support with no possible ground contact."
         ),
+    )
+    parser.add_argument(
+        "--rehearsal_effort_scale_override",
+        type=float,
+        default=None,
+        help="Escalated gantry-rehearsal effort scale in (0.1, 0.6].",
+    )
+    parser.add_argument(
+        "--rehearsal_unlimited_slew",
+        action="store_true",
+        help="Disable target slew limiting during gantry-rehearsal JUMP and SETTLE.",
+    )
+    parser.add_argument(
+        "--acknowledge_rehearsal_escalation",
+        action="store_true",
+        help="Acknowledge the higher-speed/higher-effort gantry-rehearsal envelope.",
+    )
+    parser.add_argument(
+        "--acknowledge_unmeasured_ground_jump",
+        action="store_true",
+        help="Acknowledge that touchdown cannot be detected and post-takeoff aborts only latch.",
+    )
+    parser.add_argument(
+        "--goal_sequence",
+        default=None,
+        help='Comma-separated ground-jump longitudinal goals in metres, for example "0.0,0.1,-0.1".',
+    )
+    parser.add_argument(
+        "--interactive_goals",
+        action="store_true",
+        help="Read each additional ground-jump longitudinal goal from stdin without blocking control.",
     )
     parser.add_argument("--goal_pos_x", type=float, default=0.0, help="Read-only policy goal x displacement [m].")
     parser.add_argument("--goal_pos_y", type=float, default=0.0, help="Read-only policy goal y displacement [m].")
@@ -1884,8 +2442,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--effort_scale",
         type=float,
-        default=0.7,
-        help="Fraction of manifest effort limits allowed by the command guard.",
+        default=None,
+        help="Fraction of manifest effort limits allowed by the command guard (must be explicit for ground jumps).",
     )
     parser.add_argument(
         "--enable_control",
@@ -1910,17 +2468,35 @@ def _parse_args() -> argparse.Namespace:
         help="Read and print the native locomotion FSM ID without changing it.",
     )
     args = parser.parse_args()
-    if not math.isfinite(args.duration) or not 1.0 <= args.duration <= 30.0:
-        parser.error("--duration must be finite and in [1, 30] seconds")
-    if not math.isfinite(args.effort_scale) or not 0.1 <= args.effort_scale <= 1.0:
-        parser.error("--effort_scale must be finite and in [0.1, 1.0]")
+    maximum_duration_s = _GROUND_JUMP_MAX_DURATION_S if args.ground_jump else 30.0
+    if not math.isfinite(args.duration) or not 1.0 <= args.duration <= maximum_duration_s:
+        parser.error(f"--duration must be finite and in [1, {maximum_duration_s:g}] seconds")
+    if args.effort_scale is None:
+        if args.ground_jump:
+            parser.error("--ground_jump requires explicit --effort_scale")
+        args.effort_scale = 0.7
+    if not math.isfinite(args.effort_scale) or not 0.0 < args.effort_scale <= 1.0:
+        parser.error("--effort_scale must be finite and in (0, 1.0]")
+    if not args.ground_jump and args.effort_scale < 0.1:
+        parser.error("--effort_scale must be at least 0.1 outside --ground_jump")
     if (args.check_policy or args.shadow_policy) and (args.enable_control or args.query_fsm):
         parser.error("Read-only policy modes cannot be combined with control or locomotion RPCs")
     if args.shadow_policy and args.shadow_log is None:
         parser.error("--shadow_policy requires --shadow_log")
     if not args.shadow_policy and args.shadow_log is not None:
         parser.error("--shadow_log requires --shadow_policy")
+    _validate_ground_jump_args(parser, args)
     if args.gantry_policy_rehearsal:
+        rehearsal_escalated = args.rehearsal_effort_scale_override is not None or args.rehearsal_unlimited_slew
+        if rehearsal_escalated and not args.acknowledge_rehearsal_escalation:
+            parser.error("rehearsal escalation requires --acknowledge_rehearsal_escalation")
+        if args.acknowledge_rehearsal_escalation and not rehearsal_escalated:
+            parser.error("--acknowledge_rehearsal_escalation requires a rehearsal escalation option")
+        if args.rehearsal_effort_scale_override is not None:
+            override = args.rehearsal_effort_scale_override
+            if not math.isfinite(override) or not _GANTRY_REHEARSAL_MAX_EFFORT_SCALE < override <= 0.6:
+                parser.error("--rehearsal_effort_scale_override must be finite and in (0.1, 0.6]")
+            args.effort_scale = override
         if not args.enable_control:
             parser.error("--gantry_policy_rehearsal requires --enable_control")
         if args.query_fsm:
@@ -1937,27 +2513,37 @@ def _parse_args() -> argparse.Namespace:
             parser.error("--gantry_policy_rehearsal requires --exit_mode passive")
         if args.duration < _GANTRY_REHEARSAL_MIN_DURATION_S:
             parser.error(f"--gantry_policy_rehearsal requires --duration >= {_GANTRY_REHEARSAL_MIN_DURATION_S:.1f}")
-        if args.effort_scale > _GANTRY_REHEARSAL_MAX_EFFORT_SCALE:
+        if args.rehearsal_effort_scale_override is None and args.effort_scale > _GANTRY_REHEARSAL_MAX_EFFORT_SCALE:
             parser.error(f"--gantry_policy_rehearsal limits --effort_scale to {_GANTRY_REHEARSAL_MAX_EFFORT_SCALE:.1f}")
         if any(
             abs(getattr(args, name)) > 1.0e-12
             for name in ("goal_pos_x", "goal_pos_y", "goal_yaw", "goal_roll", "goal_pitch")
         ):
             parser.error("--gantry_policy_rehearsal currently requires every goal component to be zero")
-    else:
+        args.rehearsal_escalated = rehearsal_escalated
+    elif not args.ground_jump:
+        args.rehearsal_escalated = False
         if args.shadow_admission is not None:
             parser.error("--shadow_admission requires --gantry_policy_rehearsal")
         if args.rehearsal_log is not None:
             parser.error("--rehearsal_log requires --gantry_policy_rehearsal")
         if args.acknowledge_contactless_rehearsal:
             parser.error("--acknowledge_contactless_rehearsal requires --gantry_policy_rehearsal")
+        if args.rehearsal_effort_scale_override is not None:
+            parser.error("--rehearsal_effort_scale_override requires --gantry_policy_rehearsal")
+        if args.rehearsal_unlimited_slew:
+            parser.error("--rehearsal_unlimited_slew requires --gantry_policy_rehearsal")
+        if args.acknowledge_rehearsal_escalation:
+            parser.error("--acknowledge_rehearsal_escalation requires --gantry_policy_rehearsal")
+    else:
+        args.rehearsal_escalated = False
     for name in ("goal_pos_x", "goal_pos_y", "goal_yaw", "goal_roll", "goal_pitch"):
         if not math.isfinite(getattr(args, name)):
             parser.error(f"--{name} must be finite")
     gantry_entry = args.entry_mode in ("gantry_standup", "native_walkrun_gantry")
     if args.enable_control and gantry_entry and args.duration < _GANTRY_STANDUP_DURATION_S:
         parser.error(f"--entry_mode {args.entry_mode} requires --duration >= {_GANTRY_STANDUP_DURATION_S:.1f}")
-    if args.enable_control and gantry_entry and args.effort_scale > 0.5:
+    if args.enable_control and gantry_entry and args.effort_scale > 0.5 and not args.rehearsal_escalated:
         parser.error(f"--entry_mode {args.entry_mode} limits --effort_scale to 0.5")
     if args.enable_control and args.exit_mode == "native_walkrun":
         if args.entry_mode != "native_walkrun_gantry":
@@ -2297,6 +2883,48 @@ def _blend_to_native_handoff(
     )
 
 
+def _active_feedback_limits(
+    manifest: HardwareManifest,
+    state: JumpControllerState,
+    *,
+    ground_jump: bool,
+    rehearsal_escalated: bool,
+) -> FeedbackLimits:
+    """Select the feedback envelope without changing normal control modes."""
+    ground_dynamic = ground_jump and state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
+    rehearsal_dynamic = rehearsal_escalated and state is JumpControllerState.JUMP
+    return _ground_dynamic_feedback_limits(manifest) if ground_dynamic or rehearsal_dynamic else FeedbackLimits()
+
+
+def _active_target_rate_limit(
+    state: JumpControllerState,
+    *,
+    ground_jump: bool,
+    rehearsal_unlimited_slew: bool,
+) -> float | None:
+    """Select the state-specific target slew limit."""
+    ground_unlimited = ground_jump and state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
+    rehearsal_unlimited = rehearsal_unlimited_slew and state in (
+        JumpControllerState.JUMP,
+        JumpControllerState.SETTLE,
+    )
+    unlimited = ground_unlimited or rehearsal_unlimited
+    return None if unlimited else _TARGET_RATE_LIMIT_RAD_S
+
+
+def _lock_ground_session_after_abort(
+    fsm: JumpControllerFSM,
+    operator: _GantryRehearsalOperator,
+    already_locked: bool,
+) -> bool:
+    """Clear the pending goal and lock a ground session after any latched abort."""
+    if already_locked or not fsm.abort_latched:
+        return already_locked
+    operator.set_goal(None)
+    print("SESSION LOCKED after latched abort; B to exit")
+    return True
+
+
 def _run_control(  # noqa: C901
     robot: _G1Robot,
     operator: _StandOperator,
@@ -2313,9 +2941,23 @@ def _run_control(  # noqa: C901
     recalibrate_balance_after_user_switch: bool = False,
     gantry_policy_rehearsal: bool = False,
     rehearsal_recorder: _RehearsalRecorder | None = None,
+    ground_jump: bool = False,
+    ground_goals: tuple[JumpGoal, ...] = (),
+    interactive_goal_reader: _InteractiveGoalReader | None = None,
+    ground_goal_pos_x_range: tuple[float, float] | None = None,
+    ground_recorder: _GroundJumpRecorder | None = None,
+    rehearsal_escalated: bool = False,
+    rehearsal_unlimited_slew: bool = False,
 ) -> tuple[bool, str]:
     if gantry_policy_rehearsal != (rehearsal_recorder is not None):
         raise ValueError("gantry_policy_rehearsal and rehearsal_recorder must be enabled together")
+    if ground_jump != (ground_recorder is not None):
+        raise ValueError("ground_jump and ground_recorder must be enabled together")
+    if gantry_policy_rehearsal and ground_jump:
+        raise ValueError("gantry_policy_rehearsal and ground_jump are mutually exclusive")
+    if ground_jump and ground_goal_pos_x_range is None:
+        raise ValueError("ground_jump requires a manifest goal range")
+    audit_recorder = ground_recorder if ground_jump else rehearsal_recorder
     snapshot = state_buffer.snapshot()
     if snapshot is None:
         raise SafetyFault("G1 feedback disappeared before handover")
@@ -2329,8 +2971,8 @@ def _run_control(  # noqa: C901
         raise SafetyFault(f"native control left PASSIVE before handover (code={fsm_code}, FSM ID={fsm_id})")
 
     robot.publish_takeover_damping()
-    if rehearsal_recorder is not None:
-        rehearsal_recorder.record(robot, fsm, np.zeros(robot._manifest.joint_count))
+    if audit_recorder is not None:
+        audit_recorder.record(robot, fsm, np.zeros(robot._manifest.joint_count))
     switch_attempted = False
     control_started_at: float | None = None
     success = True
@@ -2371,6 +3013,11 @@ def _run_control(  # noqa: C901
                 f"GANTRY REHEARSAL: do not press A or Y during the {_REHEARSAL_STABILIZATION_S:.1f} s "
                 "stand stabilization; wait for REHEARSAL READY."
             )
+        elif ground_jump:
+            print(
+                "GROUND JUMP ACTIVE: touchdown is unmeasured; A arms, Y confirms only after ARMED, "
+                "and B or q ends in damping."
+            )
         fsm.enable()
         fsm.step()
         control_started_at = time.monotonic()
@@ -2378,6 +3025,15 @@ def _run_control(  # noqa: C901
         next_policy = control_started_at + fsm.policy_dt
         rehearsal_started = False
         rehearsal_ready = False
+        remaining_ground_goals = list(ground_goals)
+        ground_goal_ready = False
+        ground_jump_started = False
+        completed_ground_jumps = 0
+        ground_stop_requested = False
+        ground_stop_reason = ""
+        ground_session_locked = False
+        ground_lock_reader = interactive_goal_reader
+        stdin_available = interactive_goal_reader is None or not interactive_goal_reader.eof
         while True:
             snapshot = state_buffer.snapshot()
             if snapshot is None:
@@ -2387,11 +3043,115 @@ def _run_control(  # noqa: C901
                 update_operator(snapshot.wireless_remote)
             else:
                 operator.abort = _remote_b_pressed(snapshot.wireless_remote)
-            if operator.abort:
+            if ground_stop_requested:
+                operator.abort = False
+                if fsm.state is JumpControllerState.STAND:
+                    operator.abort = True
+                    fsm.step()
+                    operator.abort = False
+                    success = False
+                    reason = ground_stop_reason
+                    break
+                if fsm.state in (JumpControllerState.DAMPING, JumpControllerState.FAULT):
+                    success = False
+                    reason = ground_stop_reason
+                    break
+            elif operator.abort:
+                abort_state = fsm.state
                 fsm.step()
-                success = False
-                reason = "operator pressed B"
-                break
+                if (
+                    ground_jump
+                    and abort_state is JumpControllerState.JUMP
+                    and fsm.state
+                    in (
+                        JumpControllerState.JUMP,
+                        JumpControllerState.SETTLE,
+                    )
+                ):
+                    ground_stop_requested = True
+                    ground_stop_reason = "operator pressed B after takeoff; latched through episode end"
+                    operator.abort = False
+                else:
+                    success = False
+                    reason = "operator pressed B"
+                    break
+            if ground_jump:
+                lock_was_active = ground_session_locked
+                ground_session_locked = _lock_ground_session_after_abort(fsm, operator, ground_session_locked)
+            else:
+                lock_was_active = False
+            if ground_session_locked and not lock_was_active:
+                ground_goal_ready = False
+                if ground_lock_reader is None and stdin_available:
+                    ground_lock_reader = _InteractiveGoalReader()
+            if ground_stop_requested:
+                operator.abort = False
+            if ground_session_locked and not ground_stop_requested:
+                if ground_lock_reader is not None and not ground_lock_reader.pending:
+                    ground_lock_reader.request("SESSION LOCKED; enter q or press B:")
+                locked_response = None if ground_lock_reader is None else ground_lock_reader.poll()
+                if ground_lock_reader is not None and ground_lock_reader.eof:
+                    stdin_available = False
+                    if interactive_goal_reader is ground_lock_reader:
+                        interactive_goal_reader = None
+                    ground_lock_reader = None
+                if locked_response is not None:
+                    if locked_response.lower() == "q":
+                        abort_state = fsm.state
+                        operator.abort = True
+                        fsm.step()
+                        operator.abort = False
+                        if abort_state is JumpControllerState.JUMP and fsm.state in (
+                            JumpControllerState.JUMP,
+                            JumpControllerState.SETTLE,
+                        ):
+                            ground_stop_requested = True
+                            ground_stop_reason = "operator entered q after a latched abort"
+                        else:
+                            success = False
+                            reason = "operator entered q after a latched abort"
+                            break
+                    else:
+                        print("SESSION LOCKED after latched abort; B to exit")
+            if (
+                ground_jump
+                and fsm.state is JumpControllerState.STAND
+                and not ground_goal_ready
+                and not ground_stop_requested
+                and not ground_session_locked
+                and now - control_started_at < duration_s
+            ):
+                goal: JumpGoal | None = None
+                if remaining_ground_goals:
+                    goal = remaining_ground_goals.pop(0)
+                elif interactive_goal_reader is not None:
+                    if not interactive_goal_reader.pending:
+                        interactive_goal_reader.request()
+                    response = interactive_goal_reader.poll()
+                    if interactive_goal_reader.eof:
+                        stdin_available = False
+                        if ground_lock_reader is interactive_goal_reader:
+                            ground_lock_reader = None
+                        interactive_goal_reader = None
+                    if response is not None:
+                        if response.lower() == "q":
+                            operator.abort = True
+                            fsm.step()
+                            operator.abort = False
+                            success = False
+                            reason = "operator entered q"
+                            break
+                        try:
+                            goal = _parse_ground_goal(response, ground_goal_pos_x_range)
+                        except ValueError as exc:
+                            print(f"GOAL REJECTED: {exc}")
+                else:
+                    reason = f"completed configured ground goal sequence ({completed_ground_jumps} jumps)"
+                    break
+                if goal is not None:
+                    operator.set_goal(goal)
+                    ground_goal_ready = True
+                    print(f"READY: tap A to arm goal dx={goal.dx:+.2f}")
             if gantry_policy_rehearsal:
                 if not rehearsal_ready and now - control_started_at >= _REHEARSAL_STABILIZATION_S:
                     rehearsal_ready = True
@@ -2400,7 +3160,13 @@ def _run_control(  # noqa: C901
                     raise SafetyFault("A or Y was pressed before REHEARSAL READY")
                 if operator.confirm and fsm.state is not JumpControllerState.ARMED and not rehearsal_started:
                     raise SafetyFault("Y was pressed before the FSM reported ARMED")
-            feedback_fault = _feedback_fault(snapshot, robot._manifest, now)
+            feedback_limits = _active_feedback_limits(
+                robot._manifest,
+                fsm.state,
+                ground_jump=ground_jump,
+                rehearsal_escalated=rehearsal_escalated,
+            )
+            feedback_fault = _feedback_fault(snapshot, robot._manifest, now, feedback_limits)
             if feedback_fault is not None:
                 raise SafetyFault(feedback_fault)
             if state_buffer.crc_errors or state_buffer.invalid_packets:
@@ -2410,7 +3176,23 @@ def _run_control(  # noqa: C901
             if now - control_started_at >= duration_s:
                 if gantry_policy_rehearsal:
                     raise SafetyFault(f"gantry rehearsal timed out in FSM state {fsm.state.value}")
-                break
+                if ground_jump:
+                    if not ground_stop_requested:
+                        abort_state = fsm.state
+                        operator.abort = True
+                        fsm.step()
+                        operator.abort = False
+                        ground_stop_requested = True
+                        ground_stop_reason = f"ground session duration expired in FSM state {fsm.state.value}"
+                        if not (
+                            abort_state is JumpControllerState.JUMP
+                            and fsm.state in (JumpControllerState.JUMP, JumpControllerState.SETTLE)
+                        ):
+                            success = False
+                            reason = ground_stop_reason
+                            break
+                else:
+                    break
             if now >= next_policy:
                 state_before = fsm.state
                 policy_step_started_at = time.monotonic()
@@ -2427,7 +3209,12 @@ def _run_control(  # noqa: C901
                     print(f"FSM: {state_before.value} -> {fsm.state.value}: {fsm.last_report}")
                     if gantry_policy_rehearsal and fsm.state is JumpControllerState.ARMED:
                         print(f"CONFIRM NOW: tap and release Y within {_REHEARSAL_ARMED_TIMEOUT_S:.0f} seconds.")
-                if not gantry_policy_rehearsal and fsm.state is not JumpControllerState.STAND:
+                    if ground_jump and fsm.state is JumpControllerState.ARMED:
+                        print(f"CONFIRM NOW: tap and release Y within {_REHEARSAL_ARMED_TIMEOUT_S:.0f} seconds.")
+                if ground_jump:
+                    for warning in fsm.drain_warnings():
+                        print(warning)
+                if not gantry_policy_rehearsal and not ground_jump and fsm.state is not JumpControllerState.STAND:
                     raise SafetyFault(f"unexpected FSM state {fsm.state.value}")
                 if gantry_policy_rehearsal:
                     if fsm.state is JumpControllerState.JUMP:
@@ -2443,10 +3230,45 @@ def _run_control(  # noqa: C901
                     if rehearsal_started and fsm.state is JumpControllerState.STAND:
                         reason = "one gantry policy rehearsal completed and settled"
                         break
+                if ground_jump:
+                    if fsm.state is JumpControllerState.JUMP:
+                        ground_jump_started = True
+                        ground_goal_ready = False
+                    lock_was_active = ground_session_locked
+                    ground_session_locked = _lock_ground_session_after_abort(fsm, operator, ground_session_locked)
+                    if ground_session_locked and not lock_was_active:
+                        ground_goal_ready = False
+                        if ground_lock_reader is None and stdin_available:
+                            ground_lock_reader = _InteractiveGoalReader()
+                    if fsm.state in (JumpControllerState.DAMPING, JumpControllerState.FAULT):
+                        success = False
+                        reason = fsm.last_report or f"ground jump entered {fsm.state.value}"
+                        break
+                    if ground_jump_started and fsm.state is JumpControllerState.STAND:
+                        completed_ground_jumps += 1
+                        ground_jump_started = False
             balance_offset = fsm.update_balance(_FAST_DT)
-            robot.publish(balance_offset, effort_scale)
-            if rehearsal_recorder is not None:
-                rehearsal_recorder.record(robot, fsm, balance_offset)
+            feedback_limits = _active_feedback_limits(
+                robot._manifest,
+                fsm.state,
+                ground_jump=ground_jump,
+                rehearsal_escalated=rehearsal_escalated,
+            )
+            if ground_jump or rehearsal_escalated:
+                robot.publish(
+                    balance_offset,
+                    effort_scale,
+                    target_rate_limit_rad_s=_active_target_rate_limit(
+                        fsm.state,
+                        ground_jump=ground_jump,
+                        rehearsal_unlimited_slew=rehearsal_unlimited_slew,
+                    ),
+                    feedback_limits=feedback_limits,
+                )
+            else:
+                robot.publish(balance_offset, effort_scale)
+            if audit_recorder is not None:
+                audit_recorder.record(robot, fsm, balance_offset)
             next_fast += _FAST_DT
             if now - next_fast > _MAX_CONTROL_GAP_S:
                 raise SafetyFault("500 Hz command schedule fell behind by more than 20 ms")
@@ -2548,7 +3370,10 @@ def main() -> int:  # noqa: C901
         )
     manifest_path = args.manifest.resolve()
     manifest = _load_hardware_manifest(manifest_path)
-    policy_requested = args.check_policy or args.shadow_policy or args.gantry_policy_rehearsal
+    ground_stand_gains, ground_balance_config = (
+        _ground_stand_configuration(manifest) if args.ground_jump else (None, None)
+    )
+    policy_requested = args.check_policy or args.shadow_policy or args.gantry_policy_rehearsal or args.ground_jump
     policy_path = (
         (args.policy.resolve() if args.policy is not None else manifest_path.with_name("policy.onnx"))
         if policy_requested
@@ -2557,6 +3382,7 @@ def main() -> int:  # noqa: C901
     _verify_validated_bundle(manifest_path, args.validation_record.resolve(), policy_path)
     rehearsal_policy = None
     rehearsal_recorder = None
+    ground_recorder = None
     rehearsal_goal = JumpGoal(
         args.goal_pos_x,
         args.goal_pos_y,
@@ -2575,6 +3401,29 @@ def main() -> int:  # noqa: C901
             manifest,
             rehearsal_goal,
             args.effort_scale,
+            target_rate_limit_rad_s=None if args.rehearsal_unlimited_slew else _TARGET_RATE_LIMIT_RAD_S,
+            rehearsal_effort_scale_override=args.rehearsal_effort_scale_override,
+            rehearsal_unlimited_slew=args.rehearsal_unlimited_slew,
+        )
+        rehearsal_policy = OnnxPolicy(policy_path, _OBSERVATION_DIM, manifest.joint_count)
+        rehearsal_policy.warm_up()
+    elif args.ground_jump:
+        _verify_shadow_admission(args.shadow_admission.resolve(), manifest_path, policy_path, manifest)
+        ground_recorder = _GroundJumpRecorder(
+            args.ground_log.resolve(),
+            manifest_path,
+            policy_path,
+            args.shadow_admission,
+            manifest,
+            args.effort_scale,
+            ground_stand_gains,
+            ground_balance_config,
+            _GROUND_STAND_ENTRY_DURATION_S,
+            True,
+            _GROUND_SETTLE_DURATION_S,
+            _GROUND_SETTLE_TIMEOUT_S,
+            _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S,
+            _GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD,
         )
         rehearsal_policy = OnnxPolicy(policy_path, _OBSERVATION_DIM, manifest.joint_count)
         rehearsal_policy.warm_up()
@@ -2588,6 +3437,9 @@ def main() -> int:  # noqa: C901
 
     if args.gantry_policy_rehearsal:
         print("G1 CONTACTLESS GANTRY POLICY REHEARSAL: ground jumping remains disabled.")
+    elif args.ground_jump:
+        print("G1 UNMEASURED GROUND JUMP: explicitly authorized floor actuation is enabled.")
+        print("WARNING: touchdown cannot be detected; a post-takeoff abort only latches until episode end.")
     else:
         print("G1 DEPLOYMENT PREFLIGHT: motor control remains stand-only.")
     print(
@@ -2765,6 +3617,16 @@ def main() -> int:  # noqa: C901
                 "the floor or any structure throughout full leg motion, area clear, hardware emergency "
                 "stop staffed, and a second person holding the remote."
             )
+            if args.rehearsal_escalated:
+                print(
+                    f"ESCALATED REHEARSAL: effort_scale={args.effort_scale:.2f}, "
+                    f"unlimited_slew={args.rehearsal_unlimited_slew}; dynamic JUMP feedback envelope enabled."
+                )
+        elif args.ground_jump:
+            print(
+                "FINAL CHECK: clear floor area, fall-arrest line slack, spotter holding the remote with B ready, "
+                "and effort progression/zero-goal prerequisites completed."
+            )
         elif gantry_entry:
             print(
                 "FINAL CHECK: gantry carrying most of the torso weight, pelvis unable to fall or rotate, "
@@ -2776,7 +3638,7 @@ def main() -> int:  # noqa: C901
                 "and another person ready if possible."
             )
         _wait_for_remote_activation(state_buffer, manifest)
-        if args.gantry_policy_rehearsal:
+        if args.gantry_policy_rehearsal or args.ground_jump:
             _verify_rehearsal_buttons_released(state_buffer, manifest)
 
         try:
@@ -2793,32 +3655,61 @@ def main() -> int:  # noqa: C901
         publisher.Init()
         low_command = unitree_hg_msg_dds__LowCmd_()
         robot = _G1Robot(manifest, state_buffer, publisher, low_command, crc)
-        operator = _GantryRehearsalOperator(rehearsal_goal) if args.gantry_policy_rehearsal else _StandOperator()
+        operator = (
+            _GantryRehearsalOperator(rehearsal_goal)
+            if args.gantry_policy_rehearsal
+            else (_GantryRehearsalOperator(JumpGoal(0.0, 0.0, 0.0)) if args.ground_jump else _StandOperator())
+        )
+        if args.ground_jump:
+            operator.set_goal(None)
         calibration_snapshot = state_buffer.snapshot()
         if calibration_snapshot is None:
             raise SafetyFault("G1 feedback disappeared before stand calibration")
         pose_fault = _stand_entry_pose_fault(calibration_snapshot, manifest, leg_error_limit)
         if pose_fault is not None:
             raise SafetyFault(pose_fault)
-        target_roll, target_pitch = quaternion_to_roll_pitch(calibration_snapshot.imu_quaternion)
         native_handoff_position = (
             calibration_snapshot.joint_positions.copy() if args.entry_mode == "native_walkrun_gantry" else None
         )
-        balance_config = BalanceControllerConfig(
-            target_roll=target_roll,
-            target_pitch=target_pitch,
-            integral_enabled=False,
-            initial_roll_integral=0.0,
-            initial_pitch_integral=0.0,
-        )
-        stand_entry_duration_s = _GANTRY_STANDUP_DURATION_S if gantry_entry else 1.0
-        if args.entry_mode == "native_walkrun_gantry":
+        if args.ground_jump:
+            if ground_stand_gains is None or ground_balance_config is None:
+                raise RuntimeError("ground STAND configuration was not initialized")
+            stand_gains = ground_stand_gains
+            balance_config = ground_balance_config
+            stand_entry_duration_s = _GROUND_STAND_ENTRY_DURATION_S
+            print(
+                "GROUND STAND CONFIG: hip_pitch/knee "
+                f"kp={_GROUND_STAND_STIFFNESS:.1f}, kd={_GROUND_STAND_DAMPING:.1f}; "
+                f"ankle kp={_GROUND_STAND_ANKLE_STIFFNESS:.1f}, kd={_GROUND_STAND_ANKLE_DAMPING:.1f}; "
+                f"reference target roll={math.degrees(balance_config.target_roll):+.2f} deg, "
+                f"pitch={math.degrees(balance_config.target_pitch):+.2f} deg; integral enabled with "
+                f"initial roll={balance_config.initial_roll_integral:.1f} rad s, "
+                f"pitch={balance_config.initial_pitch_integral:.1f} rad s; "
+                f"stand entry/attitude-target transition={stand_entry_duration_s:.1f} s; "
+                "policy-native landing stand enabled, "
+                f"settle={_GROUND_SETTLE_DURATION_S:.1f} s "
+                f"(timeout={_GROUND_SETTLE_TIMEOUT_S:.1f} s, max joint speed="
+                f"{_GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S:.2f} rad/s), joint-limit abort margin="
+                f"{_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD:.3f} rad."
+            )
+        else:
+            target_roll, target_pitch = quaternion_to_roll_pitch(calibration_snapshot.imu_quaternion)
+            balance_config = BalanceControllerConfig(
+                target_roll=target_roll,
+                target_pitch=target_pitch,
+                integral_enabled=False,
+                initial_roll_integral=0.0,
+                initial_pitch_integral=0.0,
+            )
+            stand_gains = StandGainConfig(ankle_stiffness=80.0, ankle_damping=7.0)
+            stand_entry_duration_s = _GANTRY_STANDUP_DURATION_S if gantry_entry else 1.0
+        if not args.ground_jump and args.entry_mode == "native_walkrun_gantry":
             print(
                 f"NATIVE POSE CAPTURE: roll={math.degrees(target_roll):+.2f} deg, "
                 f"pitch={math.degrees(target_pitch):+.2f} deg; balance target will be recalibrated "
                 "after user-control ownership is active."
             )
-        else:
+        elif not args.ground_jump:
             print(
                 f"STAND CALIBRATION: fixed target roll={math.degrees(target_roll):+.2f} deg, "
                 f"pitch={math.degrees(target_pitch):+.2f} deg; blend measured joints to stand over "
@@ -2828,21 +3719,40 @@ def main() -> int:  # noqa: C901
             manifest_path,
             robot,
             operator,
-            rehearsal_policy if args.gantry_policy_rehearsal else _InactivePolicy(),
-            stand_gains=StandGainConfig(ankle_stiffness=80.0, ankle_damping=7.0),
+            rehearsal_policy if (args.gantry_policy_rehearsal or args.ground_jump) else _InactivePolicy(),
+            stand_gains=stand_gains,
             config=JumpControllerConfig(
                 stand_entry_duration_s=stand_entry_duration_s,
+                stand_balance_target_entry_duration_s=(_GROUND_STAND_ENTRY_DURATION_S if args.ground_jump else 0.0),
                 stand_hold_measured_pose=False,
                 armed_timeout_s=(
                     _REHEARSAL_ARMED_TIMEOUT_S
-                    if args.gantry_policy_rehearsal
+                    if (args.gantry_policy_rehearsal or args.ground_jump)
                     else JumpControllerConfig().armed_timeout_s
                 ),
                 contact_safety_mode=(
                     JumpControllerConfig.ContactSafetyMode.GANTRY_REHEARSAL
                     if args.gantry_policy_rehearsal
-                    else JumpControllerConfig.ContactSafetyMode.MEASURED
+                    else (
+                        JumpControllerConfig.ContactSafetyMode.UNMEASURED_GROUND
+                        if args.ground_jump
+                        else JumpControllerConfig.ContactSafetyMode.MEASURED
+                    )
                 ),
+                latched_abort_upright_settle=args.ground_jump,
+                policy_stand_after_jump=args.ground_jump,
+                settle_duration_s=(
+                    _GROUND_SETTLE_DURATION_S if args.ground_jump else JumpControllerConfig().settle_duration_s
+                ),
+                settle_timeout_s=(
+                    _GROUND_SETTLE_TIMEOUT_S if args.ground_jump else JumpControllerConfig().settle_timeout_s
+                ),
+                settle_joint_velocity_tolerance_rad_s=(
+                    _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S
+                    if args.ground_jump
+                    else JumpControllerConfig().settle_joint_velocity_tolerance_rad_s
+                ),
+                joint_limit_abort_margin_rad=(_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD if args.ground_jump else 0.0),
             ),
             balance_config=balance_config,
         )
@@ -2863,6 +3773,13 @@ def main() -> int:  # noqa: C901
             recalibrate_balance_after_user_switch=args.entry_mode == "native_walkrun_gantry",
             gantry_policy_rehearsal=args.gantry_policy_rehearsal,
             rehearsal_recorder=rehearsal_recorder,
+            ground_jump=args.ground_jump,
+            ground_goals=args.ground_goals,
+            interactive_goal_reader=(_InteractiveGoalReader() if args.interactive_goals else None),
+            ground_goal_pos_x_range=args.ground_goal_pos_x_range,
+            ground_recorder=ground_recorder,
+            rehearsal_escalated=args.rehearsal_escalated,
+            rehearsal_unlimited_slew=args.rehearsal_unlimited_slew,
         )
         if rehearsal_recorder is not None:
             try:
@@ -2874,6 +3791,16 @@ def main() -> int:  # noqa: C901
             except ValueError as exc:
                 success = False
                 reason += f"; rehearsal audit failed: {exc}"
+        if ground_recorder is not None:
+            try:
+                ground_recorder.write(success, reason, state_buffer)
+                print(
+                    f"GROUND AUDIT: {ground_recorder.sample_count} accepted commands written to "
+                    f"{ground_recorder.log_path}."
+                )
+            except ValueError as exc:
+                success = False
+                reason += f"; ground audit failed: {exc}"
         peak_index = int(np.argmax(robot.maximum_estimated_torque))
         print(
             f"Peak estimated command torque: {robot.maximum_estimated_torque[peak_index]:.2f} N m "
@@ -2894,6 +3821,12 @@ def main() -> int:  # noqa: C901
                 print(f"REHEARSAL AUDIT: refusal written to {rehearsal_recorder.log_path}.")
             except ValueError as audit_exc:
                 print(f"REHEARSAL AUDIT FAILED: {audit_exc}")
+        if ground_recorder is not None and not ground_recorder.log_path.exists():
+            try:
+                ground_recorder.write(False, str(exc), state_buffer)
+                print(f"GROUND AUDIT: refusal written to {ground_recorder.log_path}.")
+            except ValueError as audit_exc:
+                print(f"GROUND AUDIT FAILED: {audit_exc}")
         print(f"REFUSED/STOPPED: {exc}")
         return 2
     finally:

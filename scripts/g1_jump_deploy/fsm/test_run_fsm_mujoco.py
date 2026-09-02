@@ -23,11 +23,13 @@ from scripts.g1_jump_deploy.fsm.run_fsm_mujoco import (
     _hardware_margin_result,
     _load_initial_state,
     _parse_args,
+    _prejump_hold_upright_result,
     _repeat_goals,
     _scenario_result,
     _scenario_timeline,
     _terminal_state_reached,
     _unmeasured_ground_contact_result,
+    run,
 )
 
 
@@ -41,6 +43,23 @@ def test_stand_scenario_has_no_operator_events() -> None:
     )
 
     assert timeline == ()
+
+
+def test_velocity_limit_emulation_flag_defaults_off_and_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_fsm_mujoco.py"])
+    assert not _parse_args().emulate_velocity_limit
+
+    monkeypatch.setattr(sys, "argv", ["run_fsm_mujoco.py", "--emulate_velocity_limit"])
+    assert _parse_args().emulate_velocity_limit
+
+
+def test_joint_limit_abort_margin_cli_is_non_negative(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_fsm_mujoco.py", "--joint_limit_abort_margin_rad", "0.02"])
+    assert _parse_args().joint_limit_abort_margin_rad == pytest.approx(0.02)
+
+    monkeypatch.setattr(sys, "argv", ["run_fsm_mujoco.py", "--joint_limit_abort_margin_rad", "-0.01"])
+    with pytest.raises(SystemExit):
+        _parse_args()
 
 
 def test_late_abort_is_sampled_at_first_flight_step() -> None:
@@ -175,6 +194,79 @@ def test_stand_scenario_passes_only_after_requested_duration() -> None:
     assert "4.000 of 10.000 s" in early_result
 
 
+def test_upright_hold_audit_rejects_soft_hips_and_accepts_ground_overrides(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_fsm_mujoco.py",
+            "--scenario",
+            "stand",
+            "--headless",
+            "--max_duration",
+            "2.0",
+            "--stand_ankle_stiffness",
+            "80.0",
+            "--stand_ankle_damping",
+            "7.0",
+            "--balance_disable_integral",
+            "--balance_initial_pitch_integral",
+            "0.0",
+            "--log",
+            str(tmp_path / "soft_hips.npz"),
+        ],
+    )
+    run(_parse_args())
+    soft_output = capsys.readouterr().out
+
+    assert "Upright hold audit: FAIL" in soft_output
+    assert "Scenario result: INCOMPLETE — upright hold failed" in soft_output
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_fsm_mujoco.py",
+            "--scenario",
+            "nominal",
+            "--unmeasured_ground_validation",
+            "--headless",
+            "--max_duration",
+            "6.0",
+            "--start_time_s",
+            "6.0",
+            "--confirm_time_s",
+            "8.8",
+            "--stand_ankle_stiffness",
+            "80.0",
+            "--stand_ankle_damping",
+            "7.0",
+            "--log",
+            str(tmp_path / "prepared_legs.npz"),
+        ],
+    )
+    run(_parse_args())
+    prepared_output = capsys.readouterr().out
+
+    assert "Upright hold audit: PASS" in prepared_output
+
+
+@pytest.mark.parametrize("state", ["STAND", "GOTO_START", "ARMED"])
+def test_upright_hold_audit_checks_every_prejump_state(state: str) -> None:
+    arrays = {
+        "fsm_state": np.asarray([state]),
+        "time": np.asarray([1.25]),
+        "tilt": np.asarray([np.deg2rad(31.0)]),
+        "pelvis_pose": np.asarray([[0.0, 0.0, 0.75, 1.0, 0.0, 0.0, 0.0]]),
+    }
+
+    passed, result = _prejump_hold_upright_result(arrays)
+
+    assert not passed
+    assert state in result
+    assert "31.00 deg" in result
+
+
 def test_inactive_policy_rejects_inference() -> None:
     policy = InactivePolicy(observation_dim=326, action_dim=23)
 
@@ -288,6 +380,101 @@ def test_contactless_gantry_rehearsal_cli_requires_exact_hardware_envelope(monke
     assert args.gantry_support_fraction == pytest.approx(1.0)
     assert args.effort_scale == pytest.approx(0.1)
     assert args.target_rate_limit_rad_s == pytest.approx(1.2)
+
+
+def _contactless_rehearsal_escalation_args() -> list[str]:
+    return [
+        "run_fsm_mujoco.py",
+        "--scenario",
+        "nominal",
+        "--contactless_gantry_rehearsal",
+        "--gantry_support_fraction",
+        "1.0",
+        "--rehearsal_effort_scale_override",
+        "0.3",
+        "--rehearsal_unlimited_slew",
+        "--max_duration",
+        "15",
+        "--start_time_s",
+        "4.5",
+        "--confirm_time_s",
+        "9.0",
+        "--stand_entry_duration_s",
+        "4.0",
+        "--stand_ankle_stiffness",
+        "80.0",
+        "--stand_ankle_damping",
+        "7.0",
+        "--balance_disable_integral",
+        "--balance_initial_roll_integral",
+        "0.0",
+        "--balance_initial_pitch_integral",
+        "0.0",
+        "--goal_pos_x",
+        "0.0",
+        "--goal_pos_y",
+        "0.0",
+        "--goal_roll",
+        "0.0",
+        "--goal_pitch",
+        "0.0",
+        "--goal_yaw",
+        "0.0",
+    ]
+
+
+def test_contactless_gantry_rehearsal_escalation_is_fail_closed(monkeypatch) -> None:
+    arguments = _contactless_rehearsal_escalation_args()
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+    arguments.append("--acknowledge_rehearsal_escalation")
+    monkeypatch.setattr(sys, "argv", arguments)
+    args = _parse_args()
+
+    assert args.effort_scale == pytest.approx(0.3)
+    assert args.target_rate_limit_rad_s is None
+
+
+@pytest.mark.parametrize("override", ["0.1", "0.61", "nan"])
+def test_contactless_gantry_rehearsal_escalation_rejects_invalid_effort(monkeypatch, override: str) -> None:
+    arguments = _contactless_rehearsal_escalation_args()
+    arguments[arguments.index("--rehearsal_effort_scale_override") + 1] = override
+    arguments.append("--acknowledge_rehearsal_escalation")
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_contactless_gantry_rehearsal_rejects_escalation_ack_without_option(monkeypatch) -> None:
+    arguments = _contactless_rehearsal_escalation_args()
+    override_index = arguments.index("--rehearsal_effort_scale_override")
+    del arguments[override_index : override_index + 2]
+    arguments.remove("--rehearsal_unlimited_slew")
+    arguments.extend(("--effort_scale", "0.1", "--target_rate_limit_rad_s", "1.2"))
+    arguments.append("--acknowledge_rehearsal_escalation")
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_mujoco_rehearsal_escalation_options_require_contactless_mode(monkeypatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_fsm_mujoco.py",
+            "--rehearsal_effort_scale_override",
+            "0.3",
+            "--acknowledge_rehearsal_escalation",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _parse_args()
 
 
 def test_unmeasured_ground_cli_keeps_ground_envelope(monkeypatch) -> None:

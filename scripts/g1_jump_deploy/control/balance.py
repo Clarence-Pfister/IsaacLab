@@ -264,6 +264,20 @@ class BalanceController:
         self._initial_integral.fill(0.0)
         self.reset()
 
+    def update_target_attitude(self, target_roll: float, target_pitch: float) -> None:
+        """Update the roll-pitch target without resetting the integral state.
+
+        Args:
+            target_roll: Target pelvis roll attitude [rad].
+            target_pitch: Target pelvis pitch attitude [rad].
+
+        Raises:
+            ValueError: If either target is non-finite.
+        """
+        if not math.isfinite(target_roll) or not math.isfinite(target_pitch):
+            raise ValueError("Balance target attitudes must be finite.")
+        self.config = replace(self.config, target_roll=float(target_roll), target_pitch=float(target_pitch))
+
     def compute(
         self,
         stand_target: Sequence[float],

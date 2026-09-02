@@ -19,7 +19,11 @@ import numpy as np
 
 from scripts.g1_jump_deploy.fsm.jump_fsm import JumpGoal
 from scripts.g1_jump_deploy.mujoco.model_overlay import apply_initial_ground_clearance, compose_model_xml
-from scripts.g1_jump_deploy.runtime import project_pd_position_target, project_position_target_to_lower_limit
+from scripts.g1_jump_deploy.runtime import (
+    project_pd_position_target,
+    project_position_target_to_lower_limit,
+    saturate_torque_at_velocity_limit,
+)
 
 _GANTRY_POSITION_STIFFNESS_N_M = 1_000.0
 _GANTRY_POSITION_DAMPING_N_S_M = 300.0
@@ -88,6 +92,7 @@ class _Manifest:
     joint_names: tuple[str, ...]
     default_position: np.ndarray
     effort_limit: np.ndarray
+    velocity_limit: np.ndarray
     effort_limit_ratio: np.ndarray | None
     brake_position_lower: np.ndarray | None
     brake_position_upper: np.ndarray | None
@@ -129,6 +134,9 @@ class _Manifest:
         if len(set(joint_names)) != len(joint_names):
             raise ValueError("Manifest field joints.names must contain unique strings.")
         joint_count = len(joint_names)
+        velocity_limit = _finite_vector(actuators.get("velocity_limit"), joint_count, "actuators.velocity_limit")
+        if np.any(velocity_limit <= 0.0):
+            raise ValueError("Manifest actuator velocity limits must be strictly positive.")
         torque_projection = action.get("torque_projection")
         if torque_projection is None:
             effort_limit_ratio = None
@@ -236,6 +244,7 @@ class _Manifest:
             joint_names=joint_names,
             default_position=_finite_vector(joints.get("default_pos"), joint_count, "joints.default_pos"),
             effort_limit=_finite_vector(actuators.get("effort_limit"), joint_count, "actuators.effort_limit"),
+            velocity_limit=velocity_limit,
             effort_limit_ratio=effort_limit_ratio,
             brake_position_lower=brake_position_lower,
             brake_position_upper=brake_position_upper,
@@ -282,6 +291,8 @@ class MujocoRobot:
         feedback_timeout_s: Maximum wall-clock feedback age [s].
         effort_scale: Fraction of manifest effort limits available to control.
         target_rate_limit_rad_s: Optional joint-target slew limit [rad/s].
+        emulate_velocity_limit: Whether to emulate the actuator velocity limit
+            with torque-speed saturation.
         gantry_support_fraction: Fraction of robot weight supported upward at
             the pelvis.
         ground_contact_enabled: Whether the compiled ground geom can collide.
@@ -296,6 +307,7 @@ class MujocoRobot:
         feedback_timeout_s: float = 0.01,
         effort_scale: float = 1.0,
         target_rate_limit_rad_s: float | None = None,
+        emulate_velocity_limit: bool = False,
         gantry_support_fraction: float = 0.0,
         ground_contact_enabled: bool = True,
     ):
@@ -314,6 +326,9 @@ class MujocoRobot:
         ):
             raise ValueError("target_rate_limit_rad_s must be a positive finite velocity.")
         self._target_rate_limit_rad_s = target_rate_limit_rad_s
+        if not isinstance(emulate_velocity_limit, bool):
+            raise ValueError("emulate_velocity_limit must be a boolean.")
+        self._emulate_velocity_limit = emulate_velocity_limit
         if not math.isfinite(gantry_support_fraction) or not 0.0 <= gantry_support_fraction <= 1.0:
             raise ValueError("gantry_support_fraction must be finite and in [0, 1].")
         self._gantry_support_fraction = float(gantry_support_fraction)
@@ -811,6 +826,19 @@ class MujocoRobot:
             raise ValueError("MuJoCo command gains must be non-negative.")
         self._base_target, self._stiffness, self._damping = values
 
+    def set_target_rate_limit(self, target_rate_limit_rad_s: float | None) -> None:
+        """Set the fast-loop joint-target slew limit.
+
+        Args:
+            target_rate_limit_rad_s: Joint-target slew limit [rad/s], or
+                ``None`` to retain the full target dynamics.
+        """
+        if target_rate_limit_rad_s is not None and (
+            not math.isfinite(target_rate_limit_rad_s) or target_rate_limit_rad_s <= 0.0
+        ):
+            raise ValueError("target_rate_limit_rad_s must be a positive finite velocity or None.")
+        self._target_rate_limit_rad_s = target_rate_limit_rad_s
+
     def record_control_duration(self, duration_s: float) -> None:
         """Record one FSM call duration for deadline reporting.
 
@@ -876,6 +904,13 @@ class MujocoRobot:
         torque_actuator = stiffness_actuator * (target_actuator - positions_actuator)
         torque_actuator -= damping_actuator * velocities_actuator
         torque_actuator = np.clip(torque_actuator, -effort_limit_actuator, effort_limit_actuator)
+        if self._emulate_velocity_limit:
+            velocity_limit_actuator = self._manifest.velocity_limit[self.actuator_from_policy]
+            torque_actuator = saturate_torque_at_velocity_limit(
+                torque_actuator,
+                velocities_actuator,
+                velocity_limit_actuator,
+            )
         self.data.ctrl[:] = torque_actuator
         self._applied_torque = torque_actuator[self.policy_from_actuator].copy()
         self._apply_gantry_wrench()

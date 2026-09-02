@@ -156,20 +156,33 @@ class JumpControllerConfig:
             measured 10-second steady-state magnitude of 0.184974632274 rad.
         goal_position_z_w: Landing-surface height in the odometry world frame [m].
         jump_abort_tilt_limit_rad: Body tilt that requests an in-jump abort [rad].
+        joint_limit_abort_margin_rad: Distance a joint may travel beyond its
+            manifest position limit during JUMP before requesting an abort
+            [rad]. Zero preserves the exact-limit abort behavior.
         contact_safety_mode: Foot-contact safety contract. ``MEASURED`` requires
             measured bilateral support before arming and uses measured contact
             for touchdown-aware abort handling. ``GANTRY_REHEARSAL`` is only
             for a mechanically constrained, ground-clear motion rehearsal and
             makes every abort enter damping immediately. ``UNMEASURED_GROUND``
-            is a simulation-only validation contract that never reads foot
+            is a no-contact validation contract that never reads foot
             contact; it latches post-takeoff aborts until the policy episode
             ends because touchdown cannot be detected.
+        latched_abort_upright_settle: Whether a latched post-takeoff abort may
+            enter :attr:`~JumpControllerState.SETTLE` after the complete policy
+            episode. Settlement is allowed only when the complete latched abort
+            reason set is exactly ``{"joint limit exceeded"}`` and the body
+            remains upright. Every other abort reason enters damping.
+        latched_abort_settle_tilt_limit_rad: Maximum body tilt allowed when
+            :attr:`latched_abort_upright_settle` is enabled [rad].
         stiffness_slew_per_s: Maximum normal-transition kp change per second
             [N·m/(rad·s)].
         damping_slew_per_s: Maximum normal-transition kd change per second
             [N·m/rad].
         stand_entry_duration_s: Nominal quintic measured-to-reference stand
             target blend duration [s].
+        stand_balance_target_entry_duration_s: Initial linear measured-to-reference
+            balance-attitude target transition [s]. Zero applies the configured
+            target immediately.
         stand_hold_measured_pose: Whether STAND holds the measured entry pose
             instead of blending to the manifest reference.
     """
@@ -208,10 +221,14 @@ class JumpControllerConfig:
     balance_offset_limit_rad: float = _DEFAULT_BALANCE_OFFSET_LIMIT_RAD
     goal_position_z_w: float = 0.0
     jump_abort_tilt_limit_rad: float = math.radians(45.0)
+    joint_limit_abort_margin_rad: float = 0.0
     contact_safety_mode: ContactSafetyMode = ContactSafetyMode.MEASURED
+    latched_abort_upright_settle: bool = False
+    latched_abort_settle_tilt_limit_rad: float = math.radians(20.0)
     stiffness_slew_per_s: float = 300.0
     damping_slew_per_s: float = 100.0
     stand_entry_duration_s: float = 1.0
+    stand_balance_target_entry_duration_s: float = 0.0
     stand_hold_measured_pose: bool = False
 
 
@@ -306,6 +323,8 @@ class _ManifestData:
     default_position: np.ndarray
     position_target_lower: np.ndarray
     position_target_upper: np.ndarray
+    joint_position_lower: np.ndarray
+    joint_position_upper: np.ndarray
     jump_stiffness: np.ndarray
     jump_damping: np.ndarray
     goal_ranges: dict[str, tuple[float, float]]
@@ -333,7 +352,7 @@ def _positive_float(value: object, name: str) -> float:
     return result
 
 
-def _load_manifest(path: str | Path) -> _ManifestData:  # noqa: C901
+def _load_manifest(path: str | Path, *, require_joint_position_limits: bool = False) -> _ManifestData:  # noqa: C901
     manifest_path = Path(path).resolve()
     try:
         with manifest_path.open(encoding="utf-8") as stream:
@@ -378,6 +397,23 @@ def _load_manifest(path: str | Path) -> _ManifestData:  # noqa: C901
         raise ValueError("joints.names must not contain duplicates.")
     joint_count = len(joint_names)
     default_position = _finite_vector(joints.get("default_pos"), joint_count, "joints.default_pos")
+    position_limits_value = joints.get("position_limits") if require_joint_position_limits else None
+    if position_limits_value is None and not require_joint_position_limits:
+        joint_position_lower = np.full(joint_count, -math.inf, dtype=np.float64)
+        joint_position_upper = np.full(joint_count, math.inf, dtype=np.float64)
+    elif position_limits_value is None:
+        raise ValueError("joint_limit_abort_margin_rad requires manifest joints.position_limits.")
+    else:
+        try:
+            joint_position_limits = np.asarray(position_limits_value, dtype=np.float64)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"joints.position_limits must contain {joint_count} finite lower-upper pairs.") from exc
+        if joint_position_limits.shape != (joint_count, 2) or not np.all(np.isfinite(joint_position_limits)):
+            raise ValueError(f"joints.position_limits must have finite shape ({joint_count}, 2).")
+        joint_position_lower = joint_position_limits[:, 0]
+        joint_position_upper = joint_position_limits[:, 1]
+        if np.any(joint_position_lower >= joint_position_upper):
+            raise ValueError("joints.position_limits lower bounds must be less than upper bounds.")
     try:
         position_target_clip = np.asarray(action.get("clip"), dtype=np.float64)
     except (TypeError, ValueError) as exc:
@@ -390,6 +426,10 @@ def _load_manifest(path: str | Path) -> _ManifestData:  # noqa: C901
         raise ValueError("action.clip lower bounds must not exceed upper bounds.")
     if np.any(default_position < position_target_lower) or np.any(default_position > position_target_upper):
         raise ValueError("joints.default_pos must lie within action.clip.")
+    if np.any(default_position < joint_position_lower) or np.any(default_position > joint_position_upper):
+        raise ValueError("joints.default_pos must lie within joints.position_limits.")
+    if np.any(position_target_lower < joint_position_lower) or np.any(position_target_upper > joint_position_upper):
+        raise ValueError("action.clip must lie within joints.position_limits.")
     jump_stiffness = _finite_vector(actuators.get("stiffness"), joint_count, "actuators.stiffness")
     jump_damping = _finite_vector(actuators.get("damping"), joint_count, "actuators.damping")
     if np.any(jump_stiffness < 0.0) or np.any(jump_damping < 0.0):
@@ -467,6 +507,8 @@ def _load_manifest(path: str | Path) -> _ManifestData:  # noqa: C901
         default_position=default_position,
         position_target_lower=position_target_lower,
         position_target_upper=position_target_upper,
+        joint_position_lower=joint_position_lower,
+        joint_position_upper=joint_position_upper,
         jump_stiffness=jump_stiffness,
         jump_damping=jump_damping,
         goal_ranges=goal_ranges,
@@ -496,11 +538,26 @@ def _validate_controller_config(config: JumpControllerConfig) -> None:
         "prearm_tilt_limit_rad",
         "balance_offset_limit_rad",
         "jump_abort_tilt_limit_rad",
+        "latched_abort_settle_tilt_limit_rad",
         "stiffness_slew_per_s",
         "damping_slew_per_s",
     )
     for field_name in positive_fields:
         _positive_float(getattr(config, field_name), field_name)
+    if (
+        isinstance(config.joint_limit_abort_margin_rad, bool)
+        or not isinstance(config.joint_limit_abort_margin_rad, (int, float))
+        or not math.isfinite(float(config.joint_limit_abort_margin_rad))
+        or config.joint_limit_abort_margin_rad < 0.0
+    ):
+        raise ValueError("joint_limit_abort_margin_rad must be a finite non-negative angle.")
+    if (
+        isinstance(config.stand_balance_target_entry_duration_s, bool)
+        or not isinstance(config.stand_balance_target_entry_duration_s, (int, float))
+        or not math.isfinite(float(config.stand_balance_target_entry_duration_s))
+        or config.stand_balance_target_entry_duration_s < 0.0
+    ):
+        raise ValueError("stand_balance_target_entry_duration_s must be a finite non-negative duration.")
     if (
         isinstance(config.goal_position_z_w, bool)
         or not isinstance(config.goal_position_z_w, (int, float))
@@ -558,6 +615,8 @@ def _validate_controller_config(config: JumpControllerConfig) -> None:
             raise ValueError(f"{field_name} must be None or a non-negative integer.")
     if not isinstance(config.contact_safety_mode, JumpControllerConfig.ContactSafetyMode):
         raise ValueError("contact_safety_mode must be a JumpControllerConfig.ContactSafetyMode value.")
+    if not isinstance(config.latched_abort_upright_settle, bool):
+        raise ValueError("latched_abort_upright_settle must be a boolean.")
     required_goto_duration_s = max(
         config.goto_start_duration_s + config.policy_prepare_duration_s,
         config.policy_stand_retrigger_prepare_duration_s,
@@ -619,7 +678,10 @@ class JumpControllerFSM:
         runtime: JumpGoalRuntime | None = None,
     ):
         _validate_controller_config(config)
-        self._manifest = _load_manifest(manifest_path)
+        self._manifest = _load_manifest(
+            manifest_path,
+            require_joint_position_limits=config.joint_limit_abort_margin_rad > 0.0,
+        )
         if config.policy_terminal_return_steps > self._manifest.episode_steps:
             raise ValueError(
                 "policy_terminal_return_steps exceeds the complete policy episode: "
@@ -655,6 +717,8 @@ class JumpControllerFSM:
         self._jump_damping = self._manifest.jump_damping.copy()
         self._stand_stiffness, self._stand_damping = self._build_stand_gains(stand_gains)
         self._balance = BalanceController(self._manifest.joint_names, balance_config)
+        self._balance_target_roll = self._balance.config.target_roll
+        self._balance_target_pitch = self._balance.config.target_pitch
         self._zeros = np.zeros(len(self._manifest.joint_names), dtype=np.float64)
 
         self.state = JumpControllerState.PASSIVE
@@ -663,11 +727,17 @@ class JumpControllerFSM:
         self.fault_reason: str | None = None
         self.latched_goal: JumpGoal | None = None
         self.abort_latched = False
+        self.latched_abort_reason: str | None = None
+        self.latched_abort_reasons: set[str] = set()
+        self.joint_limit_touches: dict[str, float] = {}
         self.episode_step = 0
         self.phase_clock_history: list[int] = []
 
         self._state_elapsed_s = 0.0
         self._stand_balance_gate = 0.0
+        self._stand_balance_target_start_roll = self._balance_target_roll
+        self._stand_balance_target_start_pitch = self._balance_target_pitch
+        self._stand_balance_target_entry_active = False
         self._goto_start_balance_gate = 0.0
         self._goto_balance_gate = 0.0
         self._policy_prepare_start_balance_gate = 0.0
@@ -698,6 +768,14 @@ class JumpControllerFSM:
         self._policy_stand_active = False
         self._policy_stand_retrigger = False
         self._direct_policy_stand_jump = False
+        self._warnings: list[str] = []
+
+    def drain_warnings(self) -> tuple[str, ...]:
+        """Return and clear non-terminal safety warnings accumulated by the FSM."""
+
+        warnings = tuple(self._warnings)
+        self._warnings.clear()
+        return warnings
 
     @property
     def policy_dt(self) -> float:
@@ -798,6 +876,17 @@ class JumpControllerFSM:
             after its manifest IDLE handoff has completed.
         """
         fast_dt = _positive_float(dt, "dt")
+        if self._stand_balance_target_entry_active and self.state is JumpControllerState.STAND:
+            duration_s = self._config.stand_balance_target_entry_duration_s
+            progress = min(self._state_elapsed_s / duration_s, 1.0)
+            target_roll = self._stand_balance_target_start_roll + progress * (
+                self._balance_target_roll - self._stand_balance_target_start_roll
+            )
+            target_pitch = self._stand_balance_target_start_pitch + progress * (
+                self._balance_target_pitch - self._stand_balance_target_start_pitch
+            )
+            self._balance.update_target_attitude(target_roll, target_pitch)
+            self._stand_balance_target_entry_active = progress < 1.0
         gate = self.balance_gate
         if gate == 0.0:
             return self._zeros.copy()
@@ -833,6 +922,8 @@ class JumpControllerFSM:
         if self.state is not JumpControllerState.PASSIVE:
             raise RuntimeError("Balance target calibration requires PASSIVE FSM state.")
         self._balance.set_target_attitude(target_roll, target_pitch)
+        self._balance_target_roll = float(target_roll)
+        self._balance_target_pitch = float(target_pitch)
 
     def reset(self) -> None:
         """Reset :attr:`~JumpControllerState.DAMPING` to passive control."""
@@ -840,6 +931,8 @@ class JumpControllerFSM:
         if self.state is JumpControllerState.DAMPING:
             self.fault_reason = None
             self.abort_latched = False
+            self.latched_abort_reason = None
+            self.latched_abort_reasons.clear()
             self.last_report = "Controller reset to passive."
             self._transition(JumpControllerState.PASSIVE)
 
@@ -1295,6 +1388,10 @@ class JumpControllerFSM:
         self.episode_step = 0
         self.phase_clock_history.clear()
         self.abort_latched = False
+        self.latched_abort_reason = None
+        self.latched_abort_reasons.clear()
+        self.joint_limit_touches.clear()
+        self._warnings.clear()
         self._airborne_seen = False
         self._damping_after_touchdown = False
         self._jump_start_position = self._last_target.copy()
@@ -1320,8 +1417,35 @@ class JumpControllerFSM:
             flags = np.asarray(self._robot.joint_limit_violations, dtype=np.bool_)
             if flags.shape != (len(self._manifest.joint_names),):
                 reasons.append("joint-limit feedback has the wrong shape")
-            elif np.any(flags):
-                reasons.append("joint limit exceeded")
+            elif self._config.joint_limit_abort_margin_rad == 0.0:
+                if np.any(flags):
+                    reasons.append("joint limit exceeded")
+            else:
+                positions = _finite_vector(
+                    self._robot.joint_positions,
+                    len(self._manifest.joint_names),
+                    "joint_positions",
+                )
+                depths = np.maximum(
+                    self._manifest.joint_position_lower - positions,
+                    positions - self._manifest.joint_position_upper,
+                )
+                depths = np.maximum(depths, 0.0)
+                margin = self._config.joint_limit_abort_margin_rad
+                beyond_margin = depths > margin
+                if np.any(beyond_margin):
+                    reasons.append("joint limit exceeded")
+                touched_within_margin = (flags | (depths > 0.0)) & ~beyond_margin
+                for index in np.flatnonzero(touched_within_margin):
+                    name = self._manifest.joint_names[int(index)]
+                    depth = float(depths[index])
+                    previous_depth = self.joint_limit_touches.get(name)
+                    self.joint_limit_touches[name] = max(depth, 0.0 if previous_depth is None else previous_depth)
+                    if previous_depth is None:
+                        self._warnings.append(
+                            f"WARNING: joint limit touched within abort margin: {name} depth={depth:.6f} rad "
+                            f"(margin={margin:.6f} rad); continuing."
+                        )
         except (TypeError, ValueError):
             reasons.append("joint-limit feedback is invalid")
         if bool(self._robot.control_deadline_missed):
@@ -1329,7 +1453,7 @@ class JumpControllerFSM:
         if bool(self._robot.feedback_stale):
             reasons.append("state feedback stale")
         if reasons:
-            self._request_jump_abort(", ".join(reasons))
+            self._request_jump_abort(reasons)
         self._update_touchdown_abort()
 
     def _update_touchdown_abort(self) -> None:
@@ -1345,7 +1469,10 @@ class JumpControllerFSM:
             self._damping_after_touchdown = True
             self.last_report = "Latched post-takeoff abort reached touchdown; damping while finishing the episode."
 
-    def _request_jump_abort(self, reason: str) -> None:
+    def _request_jump_abort(self, reasons: str | list[str]) -> None:
+        reason_values = [reasons] if isinstance(reasons, str) else list(dict.fromkeys(reasons))
+        reason_set = set(reason_values)
+        reason = ", ".join(reason_values)
         if self._config.contact_safety_mode is JumpControllerConfig.ContactSafetyMode.GANTRY_REHEARSAL:
             self.last_report = f"Gantry rehearsal aborted: {reason}; damping enabled."
             self._transition(JumpControllerState.DAMPING)
@@ -1355,6 +1482,9 @@ class JumpControllerFSM:
             self._transition(JumpControllerState.DAMPING)
             return
         self.abort_latched = True
+        self.latched_abort_reasons.update(reason_set)
+        if self.latched_abort_reason is None:
+            self.latched_abort_reason = reason
         self.last_report = f"Post-takeoff abort latched until episode end: {reason}."
 
     def _step_jump(self) -> None:
@@ -1398,10 +1528,46 @@ class JumpControllerFSM:
                     f"Runtime ended at controller step {self.episode_step}, expected {self.episode_steps}."
                 )
             if self.abort_latched:
-                self.last_report = "Latched post-takeoff abort applied after the complete episode."
-                self._transition(JumpControllerState.DAMPING)
-                if not self._damping_after_touchdown:
-                    self._command_damping()
+                reason = self.latched_abort_reason or "unspecified abort"
+                joint_limit_only = self.latched_abort_reasons == {"joint limit exceeded"}
+                if self._config.latched_abort_upright_settle and joint_limit_only:
+                    try:
+                        tilt = _body_tilt(self._robot.imu_quaternion)
+                    except ValueError as exc:
+                        self.last_report = (
+                            f"Latched post-takeoff abort ({reason}) could not verify upright settlement: {exc}; "
+                            "damping enabled."
+                        )
+                        self._transition(JumpControllerState.DAMPING)
+                        self._command_damping()
+                    else:
+                        if tilt <= self._config.latched_abort_settle_tilt_limit_rad:
+                            self.last_report = (
+                                f"Latched post-takeoff abort ({reason}) completed upright at "
+                                f"{math.degrees(tilt):.1f} deg; settling."
+                            )
+                            self._transition(JumpControllerState.SETTLE)
+                        else:
+                            self.last_report = (
+                                f"Latched post-takeoff abort ({reason}) completed at "
+                                f"{math.degrees(tilt):.1f} deg, above the "
+                                f"{math.degrees(self._config.latched_abort_settle_tilt_limit_rad):.1f} deg "
+                                "upright-settle limit; damping enabled."
+                            )
+                            self._transition(JumpControllerState.DAMPING)
+                            self._command_damping()
+                else:
+                    eligibility = (
+                        "upright settlement is disabled"
+                        if not self._config.latched_abort_upright_settle
+                        else f"abort reason set {sorted(self.latched_abort_reasons)!r} is terminal"
+                    )
+                    self.last_report = f"Latched post-takeoff abort ({reason}) applied after the complete episode."
+                    if self._config.latched_abort_upright_settle:
+                        self.last_report = f"Latched post-takeoff abort ({reason}); {eligibility}; damping enabled."
+                    self._transition(JumpControllerState.DAMPING)
+                    if not self._damping_after_touchdown:
+                        self._command_damping()
             else:
                 self.last_report = "Jump episode complete; settling."
                 self._transition(JumpControllerState.SETTLE)
@@ -1510,6 +1676,17 @@ class JumpControllerFSM:
                 f"{abs(velocities[maximum_speed_index]):.3f} rad/s exceeds "
                 f"{self._config.settle_joint_velocity_tolerance_rad_s:.3f} rad/s"
             )
+        if self._config.joint_limit_abort_margin_rad > 0.0:
+            projected_positions = positions + self.policy_dt * velocities
+            projected_limit_crossing = (projected_positions <= self._manifest.joint_position_lower) | (
+                projected_positions >= self._manifest.joint_position_upper
+            )
+            if np.any(projected_limit_crossing):
+                index = int(np.flatnonzero(projected_limit_crossing)[0])
+                failures.append(
+                    f"{self._manifest.joint_names[index]} velocity projects across its manifest limit "
+                    f"within {self.policy_dt:.3f} s"
+                )
         try:
             limit_flags = np.asarray(self._robot.joint_limit_violations, dtype=np.bool_)
             if limit_flags.shape != (joint_count,):
@@ -1675,5 +1852,18 @@ class JumpControllerFSM:
             self._balance.reset()
             self._stand_start_position = self._joint_positions_or_default()
             self._stand_balance_gate = 0.0
+            if (
+                previous_state is JumpControllerState.PASSIVE
+                and self._config.stand_balance_target_entry_duration_s > 0.0
+            ):
+                (
+                    self._stand_balance_target_start_roll,
+                    self._stand_balance_target_start_pitch,
+                ) = quaternion_to_roll_pitch(self._robot.imu_quaternion)
+                self._balance.update_target_attitude(
+                    self._stand_balance_target_start_roll,
+                    self._stand_balance_target_start_pitch,
+                )
+                self._stand_balance_target_entry_active = True
         self._state_elapsed_s = 0.0
         self.transition_history.append(state)
