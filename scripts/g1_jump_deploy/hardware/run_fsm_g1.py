@@ -40,6 +40,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from scripts.g1_jump_deploy.control.balance import (  # noqa: E402
+    BalanceController,
     BalanceControllerConfig,
     quaternion_to_roll_pitch,
 )
@@ -94,6 +95,8 @@ _NATIVE_WALKRUN_MONITOR_DURATION_S = 2.0
 _NATIVE_HANDOFF_BLEND_DURATION_S = 4.0
 _NATIVE_HANDOFF_SETTLE_DURATION_S = 1.0
 _NATIVE_HANDOFF_MAX_POSITION_ERROR_RAD = 0.15
+_NATIVE_HANDOFF_MATCHING_TARGET_TOLERANCE_RAD = 0.001
+_GROUND_NATIVE_HANDOFF_PREP_DURATION_S = 2.0
 _GANTRY_REHEARSAL_MIN_DURATION_S = 15.0
 _GANTRY_REHEARSAL_MAX_EFFORT_SCALE = 0.1
 _GROUND_JUMP_MIN_DURATION_S = 20.0
@@ -2292,8 +2295,10 @@ def _validate_ground_jump_args(parser: argparse.ArgumentParser, args: argparse.N
         parser.error(f"--ground_jump requires --duration >= {_GROUND_JUMP_MIN_DURATION_S:.0f}")
     if args.entry_mode not in ("native_stand", "passive"):
         parser.error("--ground_jump requires --entry_mode native_stand or passive")
-    if args.exit_mode != "passive":
-        parser.error("--ground_jump requires --exit_mode passive")
+    if args.exit_mode not in ("passive", "native_walkrun"):
+        parser.error("--ground_jump requires --exit_mode passive or native_walkrun")
+    if args.exit_mode == "native_walkrun" and args.entry_mode != "native_stand":
+        parser.error("--ground_jump --exit_mode native_walkrun requires --entry_mode native_stand")
     if args.goal_sequence is None and not args.interactive_goals:
         parser.error("--ground_jump requires --goal_sequence and/or --interactive_goals")
     try:
@@ -2460,7 +2465,10 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         "--exit_mode",
         choices=("passive", "native_walkrun"),
         default="passive",
-        help="Native control mode requested after a successful duration; faults and B always return to PASSIVE.",
+        help=(
+            "Native control mode requested after success; ground native_walkrun requires native_stand entry, "
+            "and faults and B always return to PASSIVE."
+        ),
     )
     parser.add_argument(
         "--query_fsm",
@@ -2546,8 +2554,13 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     if args.enable_control and gantry_entry and args.effort_scale > 0.5 and not args.rehearsal_escalated:
         parser.error(f"--entry_mode {args.entry_mode} limits --effort_scale to 0.5")
     if args.enable_control and args.exit_mode == "native_walkrun":
-        if args.entry_mode != "native_walkrun_gantry":
-            parser.error("--exit_mode native_walkrun requires --entry_mode native_walkrun_gantry")
+        ground_walkrun_return = args.ground_jump and args.entry_mode == "native_stand"
+        stand_walkrun_return = not args.ground_jump and args.entry_mode == "native_walkrun_gantry"
+        if not (ground_walkrun_return or stand_walkrun_return):
+            parser.error(
+                "--exit_mode native_walkrun requires --entry_mode native_walkrun_gantry, or "
+                "--ground_jump with --entry_mode native_stand"
+            )
         if args.duration < _NATIVE_WALKRUN_RETURN_MIN_DURATION_S:
             parser.error(
                 f"--exit_mode native_walkrun requires --duration >= {_NATIVE_WALKRUN_RETURN_MIN_DURATION_S:.1f}"
@@ -2813,12 +2826,105 @@ def _monitor_native_walkrun_return(
     return None
 
 
+def _prepare_ground_native_handoff(
+    robot: _G1Robot,
+    fsm: JumpControllerFSM,
+    state_buffer: _StateBuffer,
+    native_position: np.ndarray,
+    effort_scale: float,
+) -> BalanceController:
+    """Move a distant policy-native stand toward the manifest stand before handoff."""
+    native_target = _finite_vector(native_position, robot._manifest.joint_count, "native handoff target")
+    _, balance_config = _ground_stand_configuration(robot._manifest)
+    balance_controller = BalanceController(robot._manifest.joint_names, balance_config)
+    snapshot = state_buffer.snapshot()
+    if snapshot is None:
+        raise SafetyFault("G1 feedback disappeared before ground native-handoff preparation")
+    native_error = np.abs(snapshot.joint_positions - native_target)
+    native_worst_index = int(np.argmax(native_error))
+    if native_error[native_worst_index] <= _NATIVE_HANDOFF_MAX_POSITION_ERROR_RAD:
+        print(
+            "NATIVE HANDOFF PREP: policy-native stand is already within the "
+            f"{_NATIVE_HANDOFF_MAX_POSITION_ERROR_RAD:.2f} rad captured-pose gate "
+            f"(maximum error={native_error[native_worst_index]:.3f} rad, "
+            f"{robot._manifest.joint_names[native_worst_index]})."
+        )
+        return balance_controller
+
+    manifest_target = robot._manifest.default_position.copy()
+    start_target = robot.command_base_target
+    stiffness = _finite_vector(fsm.stand_stiffness, robot._manifest.joint_count, "stand stiffness")
+    damping = _finite_vector(fsm.stand_damping, robot._manifest.joint_count, "stand damping")
+    if not np.any(stiffness > np.finfo(np.float64).eps):
+        raise SafetyFault("ground native-handoff preparation requires active stand stiffness")
+    print(
+        "NATIVE HANDOFF PREP: policy-native stand differs from the captured pose by "
+        f"{native_error[native_worst_index]:.3f} rad at "
+        f"{robot._manifest.joint_names[native_worst_index]} (gate "
+        f"{_NATIVE_HANDOFF_MAX_POSITION_ERROR_RAD:.2f} rad); blend to the manifest stand over "
+        f"{_GROUND_NATIVE_HANDOFF_PREP_DURATION_S:.1f} s with stand gains."
+    )
+
+    started_at = time.monotonic()
+    next_fast = started_at
+    while True:
+        snapshot = state_buffer.snapshot()
+        if snapshot is None:
+            raise SafetyFault("G1 feedback disappeared during ground native-handoff preparation")
+        now = time.monotonic()
+        if _remote_b_pressed(snapshot.wireless_remote):
+            raise SafetyFault("operator pressed B during ground native-handoff preparation")
+        feedback_fault = _feedback_fault(snapshot, robot._manifest, now)
+        if feedback_fault is not None:
+            raise SafetyFault(f"ground native-handoff preparation stopped: {feedback_fault}")
+        if state_buffer.crc_errors or state_buffer.invalid_packets:
+            raise SafetyFault(
+                "ground native-handoff preparation feedback integrity error "
+                f"(CRC={state_buffer.crc_errors}, invalid={state_buffer.invalid_packets})"
+            )
+        elapsed_s = now - started_at
+        progress = min(elapsed_s / _GROUND_NATIVE_HANDOFF_PREP_DURATION_S, 1.0)
+        blend = progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress))
+        command_target = start_target + blend * (manifest_target - start_target)
+        robot.command_joint_position_target(command_target, stiffness, damping)
+        balanced_target = balance_controller.compute(
+            command_target,
+            snapshot.imu_quaternion,
+            snapshot.imu_gyroscope,
+            snapshot.joint_positions,
+            snapshot.joint_velocities,
+            _FAST_DT,
+        )
+        balance_offset = balanced_target - command_target
+        robot.publish(balance_offset, effort_scale)
+        if progress >= 1.0:
+            break
+        next_fast += _FAST_DT
+        if now - next_fast > _MAX_CONTROL_GAP_S:
+            raise SafetyFault("500 Hz ground native-handoff preparation fell behind by more than 20 ms")
+        _sleep_until(next_fast)
+
+    snapshot = state_buffer.snapshot()
+    if snapshot is None:
+        raise SafetyFault("G1 feedback disappeared after ground native-handoff preparation")
+    residual = np.abs(snapshot.joint_positions - manifest_target)
+    residual_worst_index = int(np.argmax(residual))
+    balance_controller.reset()
+    print(
+        f"NATIVE HANDOFF PREP COMPLETE: manifest-stand residual={residual[residual_worst_index]:.3f} rad "
+        f"({robot._manifest.joint_names[residual_worst_index]})."
+    )
+    return balance_controller
+
+
 def _blend_to_native_handoff(
     robot: _G1Robot,
     fsm: JumpControllerFSM,
     state_buffer: _StateBuffer,
     target_position: np.ndarray,
     effort_scale: float,
+    balance_controller: BalanceController | None = None,
+    skip_matching_blend: bool = False,
 ) -> None:
     """Blend the active stand command back to a captured native pose."""
     target = _finite_vector(target_position, robot._manifest.joint_count, "native handoff target")
@@ -2830,14 +2936,26 @@ def _blend_to_native_handoff(
     if not np.any(stiffness > np.finfo(np.float64).eps):
         raise SafetyFault("native handoff cannot start without active stand stiffness")
 
-    print(
-        f"NATIVE HANDOFF: blend to the captured FSM {_NATIVE_WALKRUN_FSM_ID} pose over "
-        f"{_NATIVE_HANDOFF_BLEND_DURATION_S:.1f} s, then settle for "
-        f"{_NATIVE_HANDOFF_SETTLE_DURATION_S:.1f} s."
+    target_delta = float(np.max(np.abs(target - start_target)))
+    blend_duration_s = (
+        0.0
+        if skip_matching_blend and target_delta <= _NATIVE_HANDOFF_MATCHING_TARGET_TOLERANCE_RAD
+        else _NATIVE_HANDOFF_BLEND_DURATION_S
     )
+    if blend_duration_s == 0.0:
+        print(
+            f"NATIVE HANDOFF: manifest preparation already commands the captured FSM {_NATIVE_WALKRUN_FSM_ID} "
+            f"pose; retain the {_NATIVE_HANDOFF_SETTLE_DURATION_S:.1f} s settle and all handoff gates."
+        )
+    else:
+        print(
+            f"NATIVE HANDOFF: blend to the captured FSM {_NATIVE_WALKRUN_FSM_ID} pose over "
+            f"{blend_duration_s:.1f} s, then settle for "
+            f"{_NATIVE_HANDOFF_SETTLE_DURATION_S:.1f} s."
+        )
     started_at = time.monotonic()
     next_fast = started_at
-    total_duration_s = _NATIVE_HANDOFF_BLEND_DURATION_S + _NATIVE_HANDOFF_SETTLE_DURATION_S
+    total_duration_s = blend_duration_s + _NATIVE_HANDOFF_SETTLE_DURATION_S
     while True:
         snapshot = state_buffer.snapshot()
         if snapshot is None:
@@ -2856,11 +2974,22 @@ def _blend_to_native_handoff(
         elapsed_s = now - started_at
         if elapsed_s >= total_duration_s:
             break
-        progress = min(elapsed_s / _NATIVE_HANDOFF_BLEND_DURATION_S, 1.0)
+        progress = 1.0 if blend_duration_s == 0.0 else min(elapsed_s / blend_duration_s, 1.0)
         blend = progress * progress * progress * (10.0 + progress * (-15.0 + 6.0 * progress))
         command_target = start_target + blend * (target - start_target)
         robot.command_joint_position_target(command_target, stiffness, damping)
-        balance_offset = fsm.update_balance(_FAST_DT)
+        if balance_controller is None:
+            balance_offset = fsm.update_balance(_FAST_DT)
+        else:
+            balanced_target = balance_controller.compute(
+                command_target,
+                snapshot.imu_quaternion,
+                snapshot.imu_gyroscope,
+                snapshot.joint_positions,
+                snapshot.joint_velocities,
+                _FAST_DT,
+            )
+            balance_offset = balanced_target - command_target
         robot.publish(balance_offset, effort_scale)
         next_fast += _FAST_DT
         if now - next_fast > _MAX_CONTROL_GAP_S:
@@ -3279,7 +3408,24 @@ def _run_control(  # noqa: C901
         if success and success_internal_mode is not None:
             if success_handoff_position is None:
                 raise SafetyFault("native WALKRUN handback pose was not captured")
-            _blend_to_native_handoff(robot, fsm, state_buffer, success_handoff_position, effort_scale)
+            handoff_balance_controller = None
+            if ground_jump:
+                handoff_balance_controller = _prepare_ground_native_handoff(
+                    robot,
+                    fsm,
+                    state_buffer,
+                    success_handoff_position,
+                    effort_scale,
+                )
+            _blend_to_native_handoff(
+                robot,
+                fsm,
+                state_buffer,
+                success_handoff_position,
+                effort_scale,
+                balance_controller=handoff_balance_controller,
+                skip_matching_blend=ground_jump,
+            )
     except KeyboardInterrupt:
         success = False
         reason = "operator pressed Ctrl+C"
@@ -3672,7 +3818,7 @@ def main() -> int:  # noqa: C901
         if pose_fault is not None:
             raise SafetyFault(pose_fault)
         native_handoff_position = (
-            calibration_snapshot.joint_positions.copy() if args.entry_mode == "native_walkrun_gantry" else None
+            calibration_snapshot.joint_positions.copy() if args.exit_mode == "native_walkrun" else None
         )
         if args.ground_jump:
             if ground_stand_gains is None or ground_balance_config is None:
@@ -3695,6 +3841,14 @@ def main() -> int:  # noqa: C901
                 f"{_GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S:.2f} rad/s), joint-limit abort margin="
                 f"{_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD:.3f} rad."
             )
+            if native_handoff_position is not None:
+                default_error = np.abs(native_handoff_position - manifest.default_position)
+                default_worst_index = int(np.argmax(default_error))
+                print(
+                    "NATIVE POSE CAPTURE: captured native stand for successful WALKRUN handback; "
+                    f"maximum manifest-default offset={default_error[default_worst_index]:.3f} rad "
+                    f"({manifest.joint_names[default_worst_index]})."
+                )
         else:
             target_roll, target_pitch = quaternion_to_roll_pitch(calibration_snapshot.imu_quaternion)
             balance_config = BalanceControllerConfig(

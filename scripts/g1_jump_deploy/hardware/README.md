@@ -149,7 +149,10 @@ abort. At episode end only a joint-limit-only abort on an upright robot (at
 most 20 degrees body tilt) may proceed through `SETTLE` to `STAND`. Tilt,
 stale-feedback, deadline, operator, or combined abort reasons enter damping.
 Any latched abort locks the session against further goals until B or `q`
-exits. B, `q`, any fault, and final exit restore native PASSIVE/damping.
+exits. B, `q`, and every fault restore native PASSIVE/damping. A successful
+session entered from `native_stand` may instead request `--exit_mode
+native_walkrun` to return to the captured native standing pose and restore FSM
+801; `--exit_mode passive` remains available as an explicit damping exit.
 
 Every ground session requires all of these physical preconditions:
 
@@ -176,6 +179,12 @@ and recorded in the immutable ground audit. After each policy episode,
 policy's jump gains for at least 0.5 seconds, rather than switching at landing
 to the independent measured-settle controller. It must converge within 4.0
 seconds before the FSM returns to `STAND`; otherwise it enters damping.
+After the configured sequence reaches `STAND`, a successful native-WALKRUN exit
+first checks whether the policy-native pose is within 0.15 rad of the captured
+entry pose. If needed, it makes a two-second quintic move to the manifest stand
+with the ground stand gains, reports the remaining error, then runs the existing
+captured-pose blend, handoff gates, and native-controller monitor. Any failure
+in this sequence falls back to PASSIVE/damping.
 
 Torque projection still targets the configured scaled effort envelope. If a
 physical target-position bound prevents that projected target from cancelling
@@ -198,7 +207,7 @@ is:
 ```bash
 python scripts/g1_jump_deploy/hardware/run_fsm_g1.py \
   NETWORK_INTERFACE --ground_jump --enable_control \
-  --entry_mode native_stand --exit_mode passive --duration 30 \
+  --entry_mode native_stand --exit_mode native_walkrun --duration 30 \
   --effort_scale 0.3 --goal_sequence "0.0" --interactive_goals \
   --shadow_admission logs/hardware_shadow/upright_20260827_v2_admission.json \
   --ground_log logs/hardware_ground/zero_FIRST_RUN.npz \

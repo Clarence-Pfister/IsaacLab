@@ -47,6 +47,7 @@ from scripts.g1_jump_deploy.hardware.run_fsm_g1 import (
     _parse_args,
     _parse_ground_goal,
     _play_audio_cue,
+    _prepare_ground_native_handoff,
     _project_shadow_target,
     _read_audio_cue,
     _RehearsalRecorder,
@@ -352,6 +353,52 @@ def test_native_walkrun_handoff_requires_slow_stand_pose() -> None:
     assert "joint speed" in (_native_walkrun_handoff_fault(moving, manifest, now) or "")
 
 
+def test_ground_native_handoff_prepares_distant_policy_stand_with_stand_gains(monkeypatch, capsys) -> None:
+    class _Clock:
+        value = 100.0
+
+        def monotonic(self) -> float:
+            self.value += _FAST_DT
+            return self.value
+
+    class _LiveStateBuffer:
+        crc_errors = 0
+        invalid_packets = 0
+
+        def __init__(self, clock: _Clock):
+            self._clock = clock
+
+        def snapshot(self) -> FeedbackSnapshot:
+            return _snapshot(self._clock.value)
+
+    clock = _Clock()
+    monkeypatch.setattr("scripts.g1_jump_deploy.hardware.run_fsm_g1.time.monotonic", clock.monotonic)
+    monkeypatch.setattr("scripts.g1_jump_deploy.hardware.run_fsm_g1._sleep_until", lambda deadline: None)
+    robot = _FakeControlRobot()
+    robot._manifest = _leg_manifest()
+    robot._base_target = np.full(23, 0.4)
+    stand_stiffness = np.full(23, 200.0)
+    stand_damping = np.full(23, 5.0)
+    fsm = SimpleNamespace(
+        stand_stiffness=stand_stiffness,
+        stand_damping=stand_damping,
+        update_balance=lambda dt: np.zeros(23),
+    )
+
+    _prepare_ground_native_handoff(
+        robot,
+        fsm,
+        _LiveStateBuffer(clock),
+        np.full(23, 0.3),
+        effort_scale=0.6,
+    )
+
+    np.testing.assert_allclose(robot.command_base_target, np.zeros(23))
+    np.testing.assert_array_equal(robot.command_stiffness, stand_stiffness)
+    np.testing.assert_array_equal(robot.command_damping, stand_damping)
+    assert "blend to the manifest stand over 2.0 s with stand gains" in capsys.readouterr().out
+
+
 def test_gantry_standup_cli_requires_duration_and_reduced_effort(monkeypatch) -> None:
     base = [
         "run_fsm_g1.py",
@@ -623,6 +670,22 @@ def test_ground_jump_allows_two_jump_session_duration_but_keeps_a_ceiling(monkey
     assert _parse_args().duration == pytest.approx(45.0)
 
     arguments[arguments.index("--duration") + 1] = "61"
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+def test_ground_jump_native_walkrun_exit_requires_native_stand(monkeypatch, tmp_path: Path) -> None:
+    arguments = _ground_jump_arguments(tmp_path)
+    arguments[arguments.index("--exit_mode") + 1] = "native_walkrun"
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    args = _parse_args()
+
+    assert args.entry_mode == "native_stand"
+    assert args.exit_mode == "native_walkrun"
+
+    arguments[arguments.index("--entry_mode") + 1] = "passive"
     monkeypatch.setattr(sys, "argv", arguments)
     with pytest.raises(SystemExit):
         _parse_args()
