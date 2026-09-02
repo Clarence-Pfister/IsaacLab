@@ -6,8 +6,14 @@
 from __future__ import annotations
 
 import csv
+import json
 import math
+import runpy
+import subprocess
+import sys
+from pathlib import Path
 
+import gymnasium as gym
 import pytest
 
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.agents.rsl_rl_ppo_cfg import (
@@ -31,6 +37,16 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.jump_env_cf
     G1JumpStage2DeployLongitudinalOdometrySmoothTargetSafeEnvCfg,
     G1JumpStage2DeployLongitudinalSmoothEnvCfg,
     G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRange020EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRange040EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRange060EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRange080EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRange100EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContact020EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContact040EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContact060EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContact080EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContact100EnvCfg,
     G1JumpStage2DeployLongitudinalUniformEnvCfg,
     G1JumpStage2DeployTranslationEnvCfg,
     G1JumpStage2EnvCfg,
@@ -275,6 +291,235 @@ def test_longitudinal_smooth_narrow_curriculum_enforces_validated_command_range(
         ".*_knee_joint": 0.3,
         ".*_ankle_.*": 0.3,
     }
+
+
+@pytest.mark.parametrize(
+    ("cfg_type", "half_range", "expected_gradient", "expected_threshold", "wide_land_weights"),
+    (
+        (G1JumpStage2DeployLongitudinalSmoothRange020EnvCfg, 0.2, 21.07, 0.20, False),
+        (G1JumpStage2DeployLongitudinalSmoothRange040EnvCfg, 0.4, 21.07, 0.35 * 0.4 / 0.65, False),
+        (G1JumpStage2DeployLongitudinalSmoothRange060EnvCfg, 0.6, 21.07, 0.35 * 0.6 / 0.65, True),
+        (G1JumpStage2DeployLongitudinalSmoothRange080EnvCfg, 0.8, 21.07, 0.35, True),
+        (G1JumpStage2DeployLongitudinalSmoothRange100EnvCfg, 1.0, 21.07, 0.35, True),
+    ),
+)
+def test_goal_range_curriculum_preserves_deployment_contract_and_narrow_position_kernel(
+    cfg_type: type,
+    half_range: float,
+    expected_gradient: float,
+    expected_threshold: float,
+    wide_land_weights: bool,
+) -> None:
+    narrow = G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg()
+    cfg = cfg_type()
+
+    assert cfg.commands.jump_goal.ranges.pos_x == (-half_range, half_range)
+    assert cfg.commands.jump_goal.ranges.pos_y == (0.0, 0.0)
+    assert cfg.commands.jump_goal.ranges.yaw == (0.0, 0.0)
+    assert cfg.commands.jump_goal.zero_goal_probability == 0.1
+    assert cfg.commands.jump_goal.boundary_goal_probability == 0.1
+    assert cfg.observations.policy.goal_remaining.func is obs_goal_remaining_latched
+    assert cfg.actions.joint_pos.effort_limit_ratio == 0.6
+    assert cfg.actions.joint_pos.alpha == narrow.actions.joint_pos.alpha
+    assert cfg.actions.joint_pos.clip == narrow.actions.joint_pos.clip
+    assert cfg.actions.joint_pos.clip["left_knee_joint"][0] >= 0.1
+    assert cfg.actions.joint_pos.clip["right_knee_joint"][0] >= 0.1
+    assert cfg.actions.joint_pos.lower_limit_velocity_lookahead == {".*_knee_joint": 0.028}
+    assert cfg.rewards.target_position.params["gradient"] == pytest.approx(expected_gradient)
+    assert cfg.terminations.task_completion_error.params["pos_threshold"] == pytest.approx(expected_threshold)
+
+    if wide_land_weights:
+        assert cfg.rewards.target_position.params["phase_weights"] == (0.0, 1.0, 2.0, 4.0, 12.0, 10.0)
+        assert cfg.rewards.target_velocity.params["phase_weights"] == (0.0, 0.0, 3.0, 3.0, 6.0, 2.0)
+        assert cfg.rewards.track_root_pos_z.params["phase_weights"] == (4.0, 8.0, 12.0, 8.0, 6.0, 6.0)
+    else:
+        assert (
+            cfg.rewards.target_position.params["phase_weights"]
+            == narrow.rewards.target_position.params["phase_weights"]
+        )
+        assert (
+            cfg.rewards.target_velocity.params["phase_weights"]
+            == narrow.rewards.target_velocity.params["phase_weights"]
+        )
+        assert (
+            cfg.rewards.track_root_pos_z.params["phase_weights"]
+            == narrow.rewards.track_root_pos_z.params["phase_weights"]
+        )
+
+
+@pytest.mark.parametrize("range_variant", ("", "Contact"))
+@pytest.mark.parametrize("range_code", ("020", "040", "060", "080", "100"))
+def test_goal_range_curriculum_tasks_use_fine_tune_runner(range_code: str, range_variant: str) -> None:
+    task_id = f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Range{range_variant}{range_code}-v0"
+    spec = gym.spec(task_id)
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        f":G1JumpStage2DeployLongitudinalSmoothRange{range_variant}{range_code}EnvCfg"
+    )
+    assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G1JumpFineTunePPORunnerCfg")
+
+
+@pytest.mark.parametrize(
+    ("variant_args", "range_variant", "selection_key", "minimum_response_gain"),
+    (
+        ([], "", "success_rate_0p10", "0.85"),
+        (
+            ["--variant", "contact", "--selection_tolerance_m", "0.20", "--minimum_response_gain", "0.90"],
+            "Contact",
+            "success_rate_0p20",
+            "0.9",
+        ),
+    ),
+)
+def test_goal_range_curriculum_driver_dry_run_prints_every_stage(
+    variant_args: list[str], range_variant: str, selection_key: str, minimum_response_gain: str
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = repo_root / "scripts" / "g1_jump_deploy" / "train" / "run_goal_range_curriculum.py"
+
+    result = subprocess.run(
+        [sys.executable, str(driver), "--dry_run", *variant_args],
+        cwd=repo_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    for range_code in ("020", "040", "060", "080", "100"):
+        task_id = f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Range{range_variant}{range_code}-v0"
+        assert result.stdout.count(task_id) == 2
+    assert result.stdout.count("scripts/reinforcement_learning/rsl_rl/train.py") == 5
+    assert result.stdout.count("scripts/g1_jump_deploy/eval/eval_success_rate.py") == 5
+    assert "--load_checkpoint model_825.pt" in result.stdout
+    assert (
+        f"# Select by {selection_key} with upright_rate >= 0.99, "
+        f"response_gain_xx >= {minimum_response_gain}, correlation_x >= 0.95"
+    ) in result.stdout
+    if range_variant:
+        assert "--run_name rangecontact020_from825" in result.stdout
+
+
+def test_goal_range_curriculum_driver_selects_requested_tolerance_and_later_tie(tmp_path: Path) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    driver = repo_root / "scripts" / "g1_jump_deploy" / "train" / "run_goal_range_curriculum.py"
+    driver_namespace = runpy.run_path(str(driver))
+    parse_evaluation = driver_namespace["_parse_evaluation"]
+    select_checkpoint = driver_namespace["_select_checkpoint"]
+    write_summary = driver_namespace["_write_summary"]
+
+    def evaluation(
+        iteration: int,
+        success_0p10: int,
+        success_0p20: int,
+        upright: int,
+        response_gain: float,
+        correlation: float,
+    ) -> dict[str, object]:
+        output = f"""
+            0.10 {success_0p10} 100 {success_0p10:.2f}% [0.0%, 100.0%]
+            0.20 {success_0p20} 100 {success_0p20:.2f}% [0.0%, 100.0%]
+            response matrix = [[{response_gain:+.3f}, n/a], [n/a, n/a]]
+            offset [m] = [+0.0110, +0.0000]
+            same-axis Pearson correlation = [x {correlation:+.3f}, y n/a]
+            upright at episode end (height > 0.60 m, tilt <= 30 deg): {upright}/100 ({upright:.2f}%)
+        """
+        return parse_evaluation(output, Path(f"model_{iteration}.pt"))
+
+    evaluations = [
+        evaluation(900, 50, 100, 100, 0.90, 0.96),
+        evaluation(925, 60, 100, 98, 1.20, 0.99),
+        evaluation(950, 50, 90, 100, 0.90, 0.96),
+        evaluation(975, 80, 100, 100, 1.00, 0.94),
+    ]
+
+    assert evaluations[0]["success_rate_0p10"] == 0.5
+    assert evaluations[0]["success_rate_0p20"] == 1.0
+    assert evaluations[0]["response_gain_xx"] == 0.9
+    assert evaluations[0]["response_offset_x"] == 0.011
+    assert evaluations[0]["correlation_x"] == 0.96
+    assert select_checkpoint(evaluations, 0.10, 0.85)[0]["iteration"] == 950
+    assert select_checkpoint(evaluations, 0.20, 0.85)[0]["iteration"] == 900
+    fallback, fallback_note = select_checkpoint(evaluations, 0.10, 1.10)
+    assert fallback["iteration"] == 975
+    assert fallback_note == "no checkpoint met the gain criterion"
+
+    selected, selection_note = select_checkpoint(evaluations, 0.10, 0.85)
+    write_summary.__globals__["_SUMMARY_ROOT"] = tmp_path
+    write_summary(
+        driver_namespace["Stage"]("range020", "020", "test-task"),
+        driver_namespace["CheckpointRef"](Path("/logs/source/model_825.pt"), "source", "model_825.pt"),
+        Path("/logs/run"),
+        300,
+        0.10,
+        0.85,
+        evaluations,
+        selected,
+        selection_note,
+    )
+    summary = json.loads((tmp_path / "range020" / "summary.json").read_text(encoding="utf-8"))
+    assert summary["selection"]["goal_tolerance_m"] == 0.10
+    assert summary["selection"]["success_rate_0p10"] == selected["success_rate_0p10"]
+    assert summary["selection"]["success_rate_0p20"] == selected["success_rate_0p20"]
+    assert summary["selection"]["response_gain_xx"] == 0.9
+    assert summary["selection"]["response_offset_x"] == 0.011
+    assert summary["selection"]["correlation_x"] == 0.96
+    assert summary["evaluations"][0]["upright_rate"] == 1.0
+
+    write_summary(
+        driver_namespace["Stage"]("fallback", "020", "test-task"),
+        driver_namespace["CheckpointRef"](Path("/logs/source/model_825.pt"), "source", "model_825.pt"),
+        Path("/logs/run"),
+        300,
+        0.10,
+        1.10,
+        evaluations,
+        fallback,
+        fallback_note,
+    )
+    fallback_summary = json.loads((tmp_path / "fallback" / "summary.json").read_text(encoding="utf-8"))
+    assert fallback_summary["selection"]["note"] == "no checkpoint met the gain criterion"
+
+
+@pytest.mark.parametrize(
+    ("plain_type", "contact_type"),
+    (
+        (G1JumpStage2DeployLongitudinalSmoothRange020EnvCfg, G1JumpStage2DeployLongitudinalSmoothRangeContact020EnvCfg),
+        (G1JumpStage2DeployLongitudinalSmoothRange040EnvCfg, G1JumpStage2DeployLongitudinalSmoothRangeContact040EnvCfg),
+        (G1JumpStage2DeployLongitudinalSmoothRange060EnvCfg, G1JumpStage2DeployLongitudinalSmoothRangeContact060EnvCfg),
+        (G1JumpStage2DeployLongitudinalSmoothRange080EnvCfg, G1JumpStage2DeployLongitudinalSmoothRangeContact080EnvCfg),
+        (G1JumpStage2DeployLongitudinalSmoothRange100EnvCfg, G1JumpStage2DeployLongitudinalSmoothRangeContact100EnvCfg),
+    ),
+)
+def test_goal_range_contact_curriculum_adds_only_contact_and_requested_actor_noise(
+    plain_type: type, contact_type: type
+) -> None:
+    reference_contact = G1JumpStage2DeployLongitudinalContactEnvCfg()
+    robust = G1JumpStage2DeployLongitudinalOdometryRobustEnvCfg()
+    plain = plain_type()
+    contact = contact_type()
+
+    assert contact.events.contact_compliance.func is reference_contact.events.contact_compliance.func
+    assert contact.events.contact_compliance.mode == reference_contact.events.contact_compliance.mode
+    assert contact.events.contact_compliance.params == reference_contact.events.contact_compliance.params
+    contact_event_names = list(contact.events.__dataclass_fields__)
+    reference_event_names = list(reference_contact.events.__dataclass_fields__)
+    assert contact_event_names == reference_event_names
+    if "physics_material" in contact_event_names:
+        assert contact_event_names.index("physics_material") < contact_event_names.index("contact_compliance")
+    else:
+        assert "physics_material" not in reference_event_names
+
+    assert contact.commands.to_dict() == plain.commands.to_dict()
+    assert contact.rewards.to_dict() == plain.rewards.to_dict()
+    assert contact.terminations.to_dict() == plain.terminations.to_dict()
+    assert contact.actions.to_dict() == plain.actions.to_dict()
+    assert contact.observations.policy.enable_corruption
+    for term_name in ("joint_vel", "base_ang_vel", "projected_gravity"):
+        contact_noise = getattr(contact.observations.policy, term_name).noise
+        robust_noise = getattr(robust.observations.policy, term_name).noise
+        assert contact_noise.to_dict() == robust_noise.to_dict()
+    assert contact.observations.policy.joint_pos.noise is plain.observations.policy.joint_pos.noise
+    assert contact.observations.policy.goal_remaining.noise is plain.observations.policy.goal_remaining.noise
 
 
 def test_longitudinal_odometry_smooth_narrow_curriculum_retains_live_feedback() -> None:

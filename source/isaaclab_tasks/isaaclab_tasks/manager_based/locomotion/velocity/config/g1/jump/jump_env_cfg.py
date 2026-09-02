@@ -749,6 +749,75 @@ class G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg(G1JumpStage2DeployLongitu
 
 
 @configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
+    """Parameterized longitudinal goal-range widening stage.
+
+    Re-scaling the Narrow position kernel from 21.07 to 5.2675 for Range020 made a
+    0.2 m miss score 0.81 instead of 0.43 and allowed command response to collapse.
+    The settled-displacement x gain changed from 0.70 at model 825 (offset +0.011
+    [m], correlation 0.97) to 0.944, 0.935, 0.695, 0.558, 0.324, and 0.340 at
+    models 900, 950, 1000, 1050, 1100, and 1124 respectively; model 1124's
+    correlation fell to 0.78. Every range therefore retains the Narrow kernel.
+    Longer stages still adopt the WideLand touchdown emphasis once their range
+    reaches 0.6 m.
+    """
+
+    goal_pos_x_range: tuple[float, float] = (-0.1, 0.1)
+    """Longitudinal command range [m]."""
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        narrow_pos_threshold = self.terminations.task_completion_error.params["pos_threshold"]
+        range_min, range_max = self.goal_pos_x_range
+        stage_half_range = max(abs(range_min), abs(range_max))
+
+        self.commands.jump_goal.ranges.pos_x = self.goal_pos_x_range
+        stage_pos_threshold = min(max(0.35 * stage_half_range / 0.65, 0.20), 0.35)
+        self.terminations.task_completion_error.params["pos_threshold"] = min(narrow_pos_threshold, stage_pos_threshold)
+
+        if stage_half_range >= 0.6:
+            self.rewards.target_position.params["phase_weights"] = (0.0, 1.0, 2.0, 4.0, 12.0, 10.0)
+            self.rewards.target_velocity.params["phase_weights"] = (0.0, 0.0, 3.0, 3.0, 6.0, 2.0)
+            self.rewards.track_root_pos_z.params["phase_weights"] = (4.0, 8.0, 12.0, 8.0, 6.0, 6.0)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRange020EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Deployment curriculum with uniformly sampled longitudinal goals [m] in [-0.2, 0.2]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.2, 0.2)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRange040EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Deployment curriculum with uniformly sampled longitudinal goals [m] in [-0.4, 0.4]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.4, 0.4)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRange060EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Deployment curriculum with uniformly sampled longitudinal goals [m] in [-0.6, 0.6]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.6, 0.6)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRange080EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Deployment curriculum with uniformly sampled longitudinal goals [m] in [-0.8, 0.8]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.8, 0.8)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRange100EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Deployment curriculum with uniformly sampled longitudinal goals [m] in [-1.0, 1.0]."""
+
+    goal_pos_x_range: tuple[float, float] = (-1.0, 1.0)
+
+
+@configclass
 class G1JumpStage2DeployLongitudinalSmoothNarrowRepeatEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
     """Latched deployment contract for policies trained to repeat narrow jumps."""
 
@@ -1238,6 +1307,69 @@ class G1JumpStage2DeployLongitudinalOdometryRobustEnvCfg(G1JumpStage2DeployLongi
         self.observations.policy.goal_remaining.func = obs_goal_remaining
         self.observations.policy.goal_remaining.params = {}
         self.observations.policy.goal_remaining.noise = UniformNoiseCfg(n_min=-0.02, n_max=0.02, operation="add")
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeEnvCfg):
+    """Longitudinal range widening with randomized contact and actor sensing."""
+
+    @configclass
+    class EventCfg(G1JumpEventCfg):
+        contact_compliance = EventTerm(
+            func=randomize_contact_compliance,
+            mode="startup",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "stiffness_range": (1.0e5, 1.0e6),
+                "damping_ratio_range": (0.8, 1.2),
+                "rigid_probability": 0.25,
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.observations.policy.enable_corruption = True
+        self.observations.policy.joint_vel.noise = UniformNoiseCfg(n_min=-1.0, n_max=1.0, operation="add")
+        self.observations.policy.base_ang_vel.noise = UniformNoiseCfg(n_min=-0.3, n_max=0.3, operation="add")
+        self.observations.policy.projected_gravity.noise = UniformNoiseCfg(n_min=-0.1, n_max=0.1, operation="add")
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContact020EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg):
+    """Contact-randomized deployment curriculum with longitudinal goals [m] in [-0.2, 0.2]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.2, 0.2)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContact040EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg):
+    """Contact-randomized deployment curriculum with longitudinal goals [m] in [-0.4, 0.4]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.4, 0.4)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContact060EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg):
+    """Contact-randomized deployment curriculum with longitudinal goals [m] in [-0.6, 0.6]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.6, 0.6)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContact080EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg):
+    """Contact-randomized deployment curriculum with longitudinal goals [m] in [-0.8, 0.8]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.8, 0.8)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContact100EnvCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg):
+    """Contact-randomized deployment curriculum with longitudinal goals [m] in [-1.0, 1.0]."""
+
+    goal_pos_x_range: tuple[float, float] = (-1.0, 1.0)
 
 
 @configclass
