@@ -220,8 +220,13 @@ class DeploymentManifest:
             raise ValueError(f"Schema 1.2 requires control.sim_dt=0.002, got {self.sim_dt}.")
         if self.decimation != 10:
             raise ValueError(f"Schema 1.2 requires control.decimation=10, got {self.decimation}.")
-        if self.episode_steps != 152:
-            raise ValueError(f"Schema 1.2 requires control.episode_steps=152, got {self.episode_steps}.")
+        # The episode covers the reference duration, rounded up to a whole policy step.
+        expected_steps = math.ceil(self.episode_duration_s / self.policy_dt - 1e-9)
+        if self.episode_steps != expected_steps:
+            raise ValueError(
+                f"control.episode_steps must be ceil(episode_duration_s / policy_dt) = {expected_steps}, "
+                f"got {self.episode_steps}."
+            )
         if not math.isclose(self.policy_dt, self.sim_dt * self.decimation, rel_tol=1e-9, abs_tol=1e-12):
             raise ValueError("control.policy_dt must equal control.sim_dt * control.decimation.")
         if not math.isclose(self.policy_hz, 1.0 / self.policy_dt, rel_tol=1e-9, abs_tol=1e-9):

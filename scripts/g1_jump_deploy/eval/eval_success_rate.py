@@ -44,7 +44,7 @@ with contextlib.suppress(ImportError):
 
 _AGENT_CFG_ENTRY_POINT = "rsl_rl_cfg_entry_point"
 _DEFAULT_EPISODES = 4096
-_EXPECTED_EPISODE_STEPS = 152
+_MINIMUM_EPISODE_STEPS = 152
 _FAILURE_TERMS = ("base_contact", "bad_orientation", "foot_tracking_error", "task_completion_error")
 _GOAL_RANGE_NAMES = ("pos_x", "pos_y", "roll", "pitch", "yaw")
 _GOAL_TOLERANCES_M = (0.10, 0.15, 0.20, 0.30)
@@ -415,9 +415,11 @@ def _failure_term_functions(env: Any) -> dict[str, tuple[Callable, dict[str, Any
 
 
 def _validate_runtime(env: Any) -> tuple[Any, Any, torch.Tensor, tuple[str, ...]]:
-    if env.max_episode_length != _EXPECTED_EPISODE_STEPS:
+    # The episode length follows the resolved reference clip, which differs between the
+    # original and the stance-extended tasks, so only require a sane positive horizon.
+    if int(env.max_episode_length) < _MINIMUM_EPISODE_STEPS:
         raise RuntimeError(
-            f"The evaluator requires {_EXPECTED_EPISODE_STEPS} control steps, but the resolved task has "
+            f"The evaluator requires at least {_MINIMUM_EPISODE_STEPS} control steps, but the resolved task has "
             f"{env.max_episode_length}."
         )
     if env._physics_handles_decimation:
@@ -620,7 +622,7 @@ def _collect_batch(
     # every tensor it creates -- including the observation manager's history buffers -- as an
     # inference tensor, which the NEXT batch's env.reset() then cannot write to in place.
     with torch.no_grad():
-        for step in range(_EXPECTED_EPISODE_STEPS):
+        for step in range(int(env.max_episode_length)):
             action = policy(observation)
             expected_shape = (env.num_envs, len(robot.joint_names))
             if not isinstance(action, torch.Tensor) or action.shape != expected_shape:
@@ -653,7 +655,7 @@ def _collect_batch(
                 peak_height,
                 airborne_streak,
                 airborne_streak_max,
-                final_step=step + 1 == _EXPECTED_EPISODE_STEPS,
+                final_step=step + 1 == int(env.max_episode_length),
             )
             if next_observation is not None:
                 observation = _policy_observation(next_observation, env.num_envs)
@@ -1120,10 +1122,7 @@ def _print_result(
     condition: str,
 ) -> dict[float, np.ndarray]:
     print("\n" + "=" * 104)
-    print(
-        f"Condition: {condition}; range scale {result.range_scale:.2f}; "
-        f"{result.sample_count} full {_EXPECTED_EPISODE_STEPS}-step episodes"
-    )
+    print(f"Condition: {condition}; range scale {result.range_scale:.2f}; {result.sample_count} full-length episodes")
     _print_ranges(base_ranges, result.scaled_ranges)
     success_masks = _success_masks(
         result,

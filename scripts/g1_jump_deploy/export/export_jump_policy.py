@@ -38,6 +38,9 @@ _AGENT_CFG_ENTRY_POINT = "rsl_rl_cfg_entry_point"
 _POLICY_FILENAME = "policy.pt"
 _ONNX_FILENAME = "policy.onnx"
 _MANIFEST_FILENAME = "deploy_manifest.json"
+# Frames to look ahead when choosing where to probe the reference preview. A clip that
+# holds a stance repeats frames, so the probe must land where the motion is changing.
+_PREVIEW_PROBE_SPAN_FRAMES = 16
 _EQUIVALENCE_SAMPLE_COUNT = 1000
 _EQUIVALENCE_TOLERANCE = 1.0e-5
 
@@ -307,7 +310,22 @@ def _generate_reference_data(
         # Infer the preview frame offsets by matching its joint-position blocks against
         # the runtime loader. This keeps even these numeric metadata values tied to the
         # active observation implementation.
-        env.start_times.zero_()
+        #
+        # Probe at a frame where the reference is actually moving. A clip that holds a
+        # stance at either end repeats identical frames, and matching a preview taken at
+        # rest cannot tell the offsets apart: every block matches the same frame.
+        reference_joint_pos = loader.ref_joint_pos
+        frame_count = int(reference_joint_pos.shape[0])
+        probe_span = min(_PREVIEW_PROBE_SPAN_FRAMES, frame_count - 1)
+        if probe_span < 1:
+            raise RuntimeError(f"Reference motion is too short to probe preview offsets: {frame_count} frames.")
+        frame_motion = torch.amax(
+            torch.abs(reference_joint_pos[probe_span:] - reference_joint_pos[:-probe_span]), dim=1
+        )
+        probe_frame = int(torch.argmax(frame_motion).item())
+        if float(frame_motion[probe_frame]) <= 0.0:
+            raise RuntimeError("Reference motion never changes; preview offsets cannot be inferred.")
+        env.start_times.fill_(probe_frame / reference_fps)
         preview_at_zero = preview_func(env, **preview_cfg.params)[0]
         preview_dim = next(term["step_dim"] for term in observation_terms if term["name"] == "reference_preview")
         num_preview_blocks, remainder = divmod(preview_dim - 1, int(loader.num_joints))
@@ -317,9 +335,9 @@ def _generate_reference_data(
         for block in range(num_preview_blocks):
             start = 1 + block * loader.num_joints
             values = preview_at_zero[start : start + loader.num_joints]
-            errors = torch.amax(torch.abs(loader.ref_joint_pos - values.unsqueeze(0)), dim=1)
-            preview_offsets.append(int(torch.argmin(errors).item()))
-        if preview_offsets != sorted(set(preview_offsets)):
+            errors = torch.amax(torch.abs(reference_joint_pos - values.unsqueeze(0)), dim=1)
+            preview_offsets.append(int(torch.argmin(errors).item()) - probe_frame)
+        if preview_offsets != sorted(set(preview_offsets)) or preview_offsets[0] < 0:
             raise RuntimeError(f"Could not infer unique increasing preview offsets: {preview_offsets}.")
     finally:
         env.start_times.copy_(original_start_times)
