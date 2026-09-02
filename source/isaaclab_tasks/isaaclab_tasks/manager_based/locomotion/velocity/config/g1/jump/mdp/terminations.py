@@ -18,6 +18,7 @@ from ..constants import REFERENCE_DURATION_S
 from .motion import (
     get_env_time,
     get_jump_phase,
+    get_jump_phases,
     get_loader,
     get_phase_id,
     get_root_relative_foot_pos,
@@ -40,7 +41,8 @@ def reference_motion_complete(env, hold_duration_s: float = 0.0) -> torch.Tensor
     """
     if not math.isfinite(hold_duration_s) or hold_duration_s < 0.0:
         raise ValueError(f"hold_duration_s must be finite and non-negative, got {hold_duration_s}.")
-    return get_env_time(env) >= REFERENCE_DURATION_S + hold_duration_s
+    reference_duration_s = getattr(getattr(env, "cfg", None), "reference_duration_s", REFERENCE_DURATION_S)
+    return get_env_time(env) >= reference_duration_s + hold_duration_s
 
 
 def ground_contact(env, threshold: float, sensor_names: Sequence[str]) -> torch.Tensor:
@@ -77,7 +79,7 @@ def foot_tracking_error(
         current_phase = get_jump_phase(env)
         active = torch.zeros(env.num_envs, device=env.device, dtype=torch.bool)
         for phase in active_phases:
-            active |= current_phase == get_phase_id(phase)
+            active |= current_phase == get_phase_id(phase, get_jump_phases(env))
         terminated &= active
 
     return terminated
@@ -104,6 +106,6 @@ def task_completion_error(
     yaw_error = torch.abs(torch.atan2(torch.sin(current_yaw - target_yaw), torch.cos(current_yaw - target_yaw)))
 
     error_exceeded = (pos_error > pos_threshold) | (yaw_error > yaw_threshold)
-    phase_exceeded = current_phase >= get_phase_id(start_phase)
+    phase_exceeded = current_phase >= get_phase_id(start_phase, get_jump_phases(env))
 
     return phase_exceeded & error_exceeded

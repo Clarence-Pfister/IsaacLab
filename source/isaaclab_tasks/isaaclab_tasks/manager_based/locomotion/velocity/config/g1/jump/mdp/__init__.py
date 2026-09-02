@@ -18,6 +18,7 @@ from .motion import (
     get_current_foot_pos_w,
     get_env_time,
     get_jump_phase,
+    get_jump_phases,
     get_loader,
     get_phase_id,
     get_phase_weight,

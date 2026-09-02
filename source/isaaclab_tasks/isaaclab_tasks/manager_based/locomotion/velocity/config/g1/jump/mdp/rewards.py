@@ -13,9 +13,10 @@ import torch
 
 from isaaclab.utils.math import euler_xyz_from_quat
 
-from ..constants import FOOT_CONTACT_SENSOR_NAMES, JOINT_ACTION_SCALES, JUMP_PHASES, REFERENCE_MOTION_FPS
+from ..constants import FOOT_CONTACT_SENSOR_NAMES, JOINT_ACTION_SCALES, REFERENCE_MOTION_FPS
 from .motion import (
     get_env_time,
+    get_jump_phases,
     get_loader,
     get_phase_weight,
     get_reward,
@@ -164,7 +165,7 @@ def target_position_error(env, phase_weights, retrigger_only=False):
 
 def _target_velocity_xy(env, phase_weights):
     active_frames = sum(
-        end - start for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values()) if weight != 0.0
+        end - start for weight, (start, end) in zip(phase_weights, get_jump_phases(env).values()) if weight != 0.0
     )
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:
@@ -246,7 +247,7 @@ def target_angular_rate(env, gradient, phase_weights):
     """
     current_yaw_rate = warp_to_torch(env.scene["robot"].data.root_ang_vel_w)[:, 2:3]
     active_frames = sum(
-        end - start for weight, (start, end) in zip(phase_weights, JUMP_PHASES.values()) if weight != 0.0
+        end - start for weight, (start, end) in zip(phase_weights, get_jump_phases(env).values()) if weight != 0.0
     )
     active_duration_s = active_frames / REFERENCE_MOTION_FPS
     if active_duration_s == 0:

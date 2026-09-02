@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 import pandas as pd
 import torch
@@ -26,16 +26,19 @@ from ..constants import (
 )
 
 
-def get_reference_initial_pose() -> tuple[
-    dict[str, float], tuple[float, float, float], tuple[float, float, float, float]
-]:
+def get_reference_initial_pose(
+    csv_path: str = CSV_MOTION_PATH,
+) -> tuple[dict[str, float], tuple[float, float, float], tuple[float, float, float, float]]:
     """Read the joint and root pose at reference frame zero.
+
+    Args:
+        csv_path: Reference motion CSV path.
 
     Returns:
         Joint positions [rad] keyed by joint name, root position [m] in XYZ order,
         and the normalized world-from-root quaternion in XYZW order.
     """
-    frame0 = pd.read_csv(CSV_MOTION_PATH, nrows=1).iloc[0]
+    frame0 = pd.read_csv(csv_path, nrows=1).iloc[0]
     joint_pos = {joint_name: float(frame0[joint_name]) for joint_name in JOINT_NAMES}
     root_pos = tuple(float(frame0[name]) for name in ("root_translateX", "root_translateY", "root_translateZ"))
     root_quat_wxyz = tuple(
@@ -48,13 +51,16 @@ def get_reference_initial_pose() -> tuple[
     return joint_pos, root_pos, root_quat_xyzw
 
 
-def get_reference_initial_state() -> tuple[dict[str, float], float]:
+def get_reference_initial_state(csv_path: str = CSV_MOTION_PATH) -> tuple[dict[str, float], float]:
     """Read frame zero joint positions and root height for robot initialization.
+
+    Args:
+        csv_path: Reference motion CSV path.
 
     Returns:
         The joint positions [rad] keyed by joint name and the root height [m].
     """
-    joint_pos, root_pos, _ = get_reference_initial_pose()
+    joint_pos, root_pos, _ = get_reference_initial_pose(csv_path)
     return joint_pos, root_pos[2]
 
 
@@ -87,9 +93,16 @@ def slerp_quat(
 class MotionLoader:
     """Handles loading and interpolation of joint and root motion data from a CSV file."""
 
-    def __init__(self, csv_path: str, device: str):
+    def __init__(
+        self,
+        csv_path: str,
+        device: str,
+        expected_num_frames: int = REFERENCE_NUM_FRAMES,
+        motion_fps: float = REFERENCE_MOTION_FPS,
+    ):
         self.device = device
         self.csv_path = os.path.abspath(csv_path)
+        self.motion_fps = motion_fps
 
         self.joint_names = JOINT_NAMES
         self.joint_ids = None
@@ -99,7 +112,7 @@ class MotionLoader:
             raise FileNotFoundError(f"Reference motion CSV not found: {self.csv_path}.")
 
         df = pd.read_csv(self.csv_path)
-        motion_dt = 1 / REFERENCE_MOTION_FPS
+        motion_dt = 1 / self.motion_fps
 
         # Joint Positions & Velocities
         self.ref_joint_pos = torch.tensor(df[JOINT_NAMES].values, device=device, dtype=torch.float32)
@@ -158,8 +171,8 @@ class MotionLoader:
         self.length = self.ref_joint_pos.shape[0]
         self.num_joints = self.ref_joint_pos.shape[1]
 
-        if self.length != REFERENCE_NUM_FRAMES:
-            raise ValueError(f"Expected {REFERENCE_NUM_FRAMES} frames in reference motion, but found {self.length}.")
+        if self.length != expected_num_frames:
+            raise ValueError(f"Expected {expected_num_frames} frames in reference motion, but found {self.length}.")
         if self.num_joints != NUMBER_OF_JOINTS:
             raise ValueError(f"Expected {NUMBER_OF_JOINTS} joints in reference motion, but found {self.num_joints}.")
         print(f"Loaded reference motion from {self.csv_path}")
@@ -167,7 +180,7 @@ class MotionLoader:
 
     def get_state(self, current_time: torch.Tensor):
         """Returns linearly interpolated reference states."""
-        frame_idx_float = current_time * REFERENCE_MOTION_FPS
+        frame_idx_float = current_time * self.motion_fps
         idx_low = torch.floor(frame_idx_float).to(torch.long)
         idx_high = torch.ceil(frame_idx_float).to(torch.long)
 
@@ -214,8 +227,19 @@ class MotionLoader:
 def get_loader(env) -> MotionLoader:
     """Singleton accessor for MotionLoader."""
     if not hasattr(env, "motion_loader"):
-        env.motion_loader = MotionLoader(CSV_MOTION_PATH, env.device)
+        env_cfg = getattr(env, "cfg", None)
+        env.motion_loader = MotionLoader(
+            getattr(env_cfg, "reference_motion_path", CSV_MOTION_PATH),
+            env.device,
+            expected_num_frames=getattr(env_cfg, "reference_num_frames", REFERENCE_NUM_FRAMES),
+            motion_fps=getattr(env_cfg, "reference_motion_fps", REFERENCE_MOTION_FPS),
+        )
     return env.motion_loader
+
+
+def get_jump_phases(env) -> Mapping[str, tuple[int, int]]:
+    """Return the jump phase table configured for an environment."""
+    return getattr(getattr(env, "cfg", None), "jump_phases", JUMP_PHASES)
 
 
 def get_reward(u: torch.Tensor, v: torch.Tensor, gradient: float) -> torch.Tensor:
@@ -228,7 +252,10 @@ def get_jump_phase(env) -> torch.Tensor:
     current_time = get_env_time(env)
     # Internal boundaries are phase starts; right=True preserves [start, end) semantics.
     phase_ends = torch.tensor(
-        [end / REFERENCE_MOTION_FPS for _, end in JUMP_PHASES.values()][:-1],
+        [
+            end / getattr(getattr(env, "cfg", None), "reference_motion_fps", REFERENCE_MOTION_FPS)
+            for _, end in get_jump_phases(env).values()
+        ][:-1],
         device=env.device,
         dtype=current_time.dtype,
     )
@@ -241,10 +268,10 @@ def get_phase_weight(env, phase_weights: Sequence[float]) -> torch.Tensor:
     return weights[get_jump_phase(env)]
 
 
-def get_phase_id(phase_name: str) -> int:
-    """Returns the integer phase id from the ordered JUMP_PHASES mapping."""
+def get_phase_id(phase_name: str, jump_phases: Mapping[str, tuple[int, int]] = JUMP_PHASES) -> int:
+    """Return the integer phase id from an ordered phase mapping."""
     try:
-        return list(JUMP_PHASES).index(phase_name)
+        return list(jump_phases).index(phase_name)
     except ValueError as exc:
         raise ValueError(f"Unknown jump phase: {phase_name}.") from exc
 

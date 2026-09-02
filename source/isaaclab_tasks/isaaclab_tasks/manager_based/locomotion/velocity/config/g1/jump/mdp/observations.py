@@ -12,8 +12,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul, quat_unique, yaw_quat
 
-from ..constants import JUMP_PHASES, REFERENCE_MOTION_FPS
-from .motion import get_env_time, get_jump_phase, get_loader, warp_to_torch
+from .motion import get_env_time, get_jump_phase, get_jump_phases, get_loader, warp_to_torch
 
 
 def obs_projected_gravity(env, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
@@ -44,7 +43,7 @@ def obs_future_reference_preview(env) -> torch.Tensor:
     """
     loader = get_loader(env)
     current_time = get_env_time(env)
-    reference_dt = 1.0 / REFERENCE_MOTION_FPS
+    reference_dt = 1.0 / loader.motion_fps
 
     # Define future time offsets for preview
     t_0 = current_time
@@ -259,7 +258,7 @@ def obs_goal_remaining_stale(env, freeze_prob: float = 1.0, drift_std: float = 0
     live_value = obs_goal_remaining(env)
     phase = get_jump_phase(env)
     episode_step = env.episode_length_buf
-    flight_phase = list(JUMP_PHASES).index("FLIGHT")
+    flight_phase = list(get_jump_phases(env)).index("FLIGHT")
     state_name = "_obs_goal_remaining_stale_state"
 
     if not hasattr(env, state_name):
@@ -314,6 +313,6 @@ def obs_goal_remaining_stale(env, freeze_prob: float = 1.0, drift_std: float = 0
 def obs_jump_phase(env) -> torch.Tensor:
     """Returns the current jump phase as a one-hot policy observation."""
     phase = get_jump_phase(env)
-    phase_obs = torch.zeros((env.num_envs, len(JUMP_PHASES)), device=env.device)
+    phase_obs = torch.zeros((env.num_envs, len(get_jump_phases(env))), device=env.device)
     phase_obs.scatter_(1, phase.unsqueeze(-1), 1.0)
     return phase_obs

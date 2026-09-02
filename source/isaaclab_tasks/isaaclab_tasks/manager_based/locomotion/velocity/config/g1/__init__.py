@@ -171,6 +171,19 @@ gym.register(
 )
 
 
+gym.register(
+    id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-NarrowExtended-v0",
+    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.jump.jump_env_cfg:G1JumpStage2DeployLongitudinalSmoothNarrowExtendedEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+    },
+)
+
+
 for range_name in ("020", "040", "060", "080", "100"):
     gym.register(
         id=f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Range{range_name}-v0",

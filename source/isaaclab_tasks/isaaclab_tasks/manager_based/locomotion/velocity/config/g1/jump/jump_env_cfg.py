@@ -30,13 +30,21 @@ from isaaclab.utils.noise import UniformNoiseCfg
 from .constants import (
     CONTACT_SENSOR_NAMES,
     CONTACT_SENSOR_PRIM_PATHS,
+    CSV_MOTION_PATH,
+    CSV_MOTION_PATH_EXTENDED,
     G1_23DOF_HOLO_COMPAT_CFG,
     JOINT_ACTION_SCALES,
     JOINT_NAMES,
     JOINT_POSITION_LIMITS,
+    JUMP_PHASES,
+    JUMP_PHASES_EXTENDED,
     NON_FOOT_CONTACT_SENSOR_NAMES,
     PLAY_JOINT_ACTION_FILTER_ALPHA,
     REFERENCE_DURATION_S,
+    REFERENCE_DURATION_S_EXTENDED,
+    REFERENCE_MOTION_FPS,
+    REFERENCE_NUM_FRAMES,
+    REFERENCE_NUM_FRAMES_EXTENDED,
 )
 from .mdp import (
     JumpGoalCommandCfg,
@@ -519,6 +527,11 @@ class G1JumpTerminationsCfg:
 
 @configclass
 class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
+    reference_motion_path: str = CSV_MOTION_PATH
+    reference_num_frames: int = REFERENCE_NUM_FRAMES
+    reference_motion_fps: float = REFERENCE_MOTION_FPS
+    reference_duration_s: float = REFERENCE_DURATION_S
+    jump_phases: dict[str, tuple[int, int]] = JUMP_PHASES
     sim: sim_utils.SimulationCfg = sim_utils.SimulationCfg(
         physics=PhysxCfg(enable_external_forces_every_iteration=True)
     )
@@ -533,14 +546,14 @@ class G1JumpEnvCfg(ManagerBasedRLEnvCfg):
     def __post_init__(self):
         self.decimation = 10
         self.sim.dt = 0.002
-        self.episode_length_s = REFERENCE_DURATION_S
+        self.episode_length_s = self.reference_duration_s
         self.sim.render_interval = self.decimation
         self.sim.physics_material = self.scene.terrain.physics_material
         for sensor_name in CONTACT_SENSOR_NAMES:
             getattr(self.scene, sensor_name).update_period = self.sim.dt
         # Keep default_joint_pos, non-RSI resets, and the default action offset aligned
         # with reference frame 0.
-        init_joint_pos, init_root_pos, init_root_quat = get_reference_initial_pose()
+        init_joint_pos, init_root_pos, init_root_quat = get_reference_initial_pose(self.reference_motion_path)
         self.scene.robot.init_state.joint_pos = init_joint_pos
         self.scene.robot.init_state.pos = (0.0, 0.0, init_root_pos[2])
         self.scene.robot.init_state.rot = init_root_quat
@@ -749,6 +762,16 @@ class G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg(G1JumpStage2DeployLongitu
             action_clip[joint_name] = (0.1, upper)
         self.actions.joint_pos.clip = action_clip
         self.actions.joint_pos.lower_limit_velocity_lookahead = {".*_knee_joint": 0.028}
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothNarrowExtendedEnvCfg(G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg):
+    """Narrow deployment task fine-tuned on the stance-extended jump reference."""
+
+    reference_motion_path: str = CSV_MOTION_PATH_EXTENDED
+    reference_num_frames: int = REFERENCE_NUM_FRAMES_EXTENDED
+    reference_duration_s: float = REFERENCE_DURATION_S_EXTENDED
+    jump_phases: dict[str, tuple[int, int]] = JUMP_PHASES_EXTENDED
 
 
 @configclass

@@ -22,8 +22,14 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.agents.rsl_rl_pp
 )
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.constants import (
     CSV_MOTION_PATH,
+    CSV_MOTION_PATH_EXTENDED,
     JUMP_PHASES,
+    JUMP_PHASES_EXTENDED,
+    REFERENCE_DURATION_S,
+    REFERENCE_DURATION_S_EXTENDED,
     REFERENCE_MOTION_FPS,
+    REFERENCE_NUM_FRAMES,
+    REFERENCE_NUM_FRAMES_EXTENDED,
 )
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.jump_env_cfg import (
     G1JumpStage1DeployEnvCfg,
@@ -37,6 +43,7 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.jump_env_cf
     G1JumpStage2DeployLongitudinalOdometrySmoothTargetSafeEnvCfg,
     G1JumpStage2DeployLongitudinalSmoothEnvCfg,
     G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothNarrowExtendedEnvCfg,
     G1JumpStage2DeployLongitudinalSmoothRange020EnvCfg,
     G1JumpStage2DeployLongitudinalSmoothRange040EnvCfg,
     G1JumpStage2DeployLongitudinalSmoothRange060EnvCfg,
@@ -296,6 +303,60 @@ def test_longitudinal_smooth_narrow_curriculum_enforces_validated_command_range(
         ".*_knee_joint": 0.3,
         ".*_ankle_.*": 0.3,
     }
+
+
+def test_extended_reference_curriculum_preserves_narrow_deployment_contract() -> None:
+    narrow = G1JumpStage2DeployLongitudinalSmoothNarrowEnvCfg()
+    extended = G1JumpStage2DeployLongitudinalSmoothNarrowExtendedEnvCfg()
+
+    assert extended.commands.jump_goal.ranges.pos_x == narrow.commands.jump_goal.ranges.pos_x == (-0.1, 0.1)
+    assert extended.commands.jump_goal.ranges.pos_y == narrow.commands.jump_goal.ranges.pos_y == (0.0, 0.0)
+    assert extended.commands.jump_goal.ranges.yaw == narrow.commands.jump_goal.ranges.yaw == (0.0, 0.0)
+    assert extended.observations.policy.goal_remaining.func is obs_goal_remaining_latched
+    assert extended.actions.joint_pos.effort_limit_ratio == narrow.actions.joint_pos.effort_limit_ratio == 0.6
+    assert (
+        extended.actions.joint_pos.alpha
+        == narrow.actions.joint_pos.alpha
+        == {
+            ".*_hip_.*": 0.3,
+            ".*_knee_joint": 0.3,
+            ".*_ankle_.*": 0.3,
+        }
+    )
+    assert extended.actions.joint_pos.clip == narrow.actions.joint_pos.clip
+    assert extended.actions.joint_pos.clip["left_knee_joint"][0] == 0.1
+    assert extended.actions.joint_pos.clip["right_knee_joint"][0] == 0.1
+    assert extended.actions.joint_pos.lower_limit_velocity_lookahead == {".*_knee_joint": 0.028}
+
+    assert narrow.reference_motion_path == CSV_MOTION_PATH
+    assert narrow.reference_num_frames == REFERENCE_NUM_FRAMES
+    assert narrow.reference_duration_s == REFERENCE_DURATION_S
+    assert narrow.jump_phases == JUMP_PHASES
+    assert extended.reference_motion_path == CSV_MOTION_PATH_EXTENDED
+    assert extended.reference_num_frames == REFERENCE_NUM_FRAMES_EXTENDED
+    assert extended.reference_duration_s == REFERENCE_DURATION_S_EXTENDED
+    assert extended.jump_phases == JUMP_PHASES_EXTENDED
+    assert narrow.episode_length_s == REFERENCE_DURATION_S
+    assert extended.episode_length_s == REFERENCE_DURATION_S_EXTENDED
+
+
+def test_extended_reference_phase_table_covers_every_frame() -> None:
+    previous_end = 0
+    covered_frames = []
+    for start, end in JUMP_PHASES_EXTENDED.values():
+        assert start == previous_end
+        assert start < end
+        covered_frames.extend(range(start, end))
+        previous_end = end
+
+    assert covered_frames == list(range(REFERENCE_NUM_FRAMES_EXTENDED))
+
+
+def test_extended_reference_task_uses_fine_tune_runner() -> None:
+    spec = gym.spec("Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-NarrowExtended-v0")
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith(":G1JumpStage2DeployLongitudinalSmoothNarrowExtendedEnvCfg")
+    assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G1JumpFineTunePPORunnerCfg")
 
 
 @pytest.mark.parametrize(

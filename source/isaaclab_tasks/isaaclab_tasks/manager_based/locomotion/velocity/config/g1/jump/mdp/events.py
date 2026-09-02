@@ -15,7 +15,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import normalize, quat_from_euler_xyz, quat_mul
 
-from ..constants import REFERENCE_DURATION_S, REFERENCE_MOTION_FPS
+from ..constants import REFERENCE_DURATION_S
 from .motion import get_loader, warp_to_torch
 
 if TYPE_CHECKING:
@@ -61,7 +61,7 @@ def reference_state_initialization(
 
     if len(rsi_env_ids) > 0:
         random_frame_ids = torch.randint(0, loader.length, (len(rsi_env_ids),), device=env.device)
-        start_times = random_frame_ids / REFERENCE_MOTION_FPS
+        start_times = random_frame_ids / loader.motion_fps
         if not hasattr(env, "start_times"):
             env.start_times = torch.zeros(env.num_envs, device=env.device)
         env.start_times[rsi_env_ids] = start_times

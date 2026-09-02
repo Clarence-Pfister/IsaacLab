@@ -31,9 +31,12 @@ DATA_STORAGE_DIR = Path(__file__).resolve().parents[9] / "data_storage"
 # correct -- the USD capsules match the MJCF fromto midpoints exactly -- so the fix belongs in
 # the motion, not the asset.
 CSV_MOTION_PATH = str(DATA_STORAGE_DIR / "perfect_jump_ground_aligned.csv")
+CSV_MOTION_PATH_EXTENDED = str(DATA_STORAGE_DIR / "perfect_jump_extended.csv")
 REFERENCE_NUM_FRAMES = 91
+REFERENCE_NUM_FRAMES_EXTENDED = 196
 REFERENCE_MOTION_FPS = 30.0
 REFERENCE_DURATION_S = REFERENCE_NUM_FRAMES / REFERENCE_MOTION_FPS
+REFERENCE_DURATION_S_EXTENDED = REFERENCE_NUM_FRAMES_EXTENDED / REFERENCE_MOTION_FPS
 NUMBER_OF_JOINTS = 23
 JUMP_PHASES = {
     "IDLE": (0, 6),
@@ -42,6 +45,14 @@ JUMP_PHASES = {
     "FLIGHT": (26, 43),
     "LAND": (43, 60),
     "STAND": (60, 91),
+}
+JUMP_PHASES_EXTENDED = {
+    "IDLE": (0, 51),
+    "CROUCH": (51, 64),
+    "TAKEOFF": (64, 71),
+    "FLIGHT": (71, 88),
+    "LAND": (88, 105),
+    "STAND": (105, 196),
 }
 
 G1_USD_PATH = str(DATA_STORAGE_DIR / "g1_23dof_holo_compat" / "g1_23dof_holo_compat" / "g1_23dof_holo_compat.usda")
