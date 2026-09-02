@@ -925,6 +925,12 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     parser.add_argument("--scenario", choices=_SCENARIOS, default="nominal")
     parser.add_argument("--log", type=Path, default=None, help="Defaults to fsm_mujoco_<scenario>.npz.")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--viewer_speed",
+        type=float,
+        default=None,
+        help="Pace an active viewer at this multiple of real time; omitted runs unpaced.",
+    )
     parser.add_argument("--max_duration", type=float, default=8.0, help="Maximum simulated duration [s].")
     parser.add_argument(
         "--emulate_velocity_limit",
@@ -1180,6 +1186,8 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         )
     if not math.isfinite(args.max_duration) or args.max_duration <= 0.0:
         parser.error("--max_duration must be a positive finite duration.")
+    if args.viewer_speed is not None and (not math.isfinite(args.viewer_speed) or args.viewer_speed <= 0.0):
+        parser.error("--viewer_speed must be a positive finite multiplier.")
     if not math.isfinite(args.start_time_s) or args.start_time_s < 0.0:
         parser.error("--start_time_s must be a finite non-negative time.")
     if not math.isfinite(args.confirm_time_s) or args.confirm_time_s <= args.start_time_s:
@@ -1613,7 +1621,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
     stop_reason = f"maximum duration {args.max_duration:.3f} s reached"
     try:
         for physics_step in range(maximum_physics_steps):
-            step_start = time.monotonic()
+            step_start = time.perf_counter()
             if physics_step % robot.decimation == 0:
                 control_time_s = float(robot.data.time)
                 operator.update(control_time_s)
@@ -1691,9 +1699,10 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
                     stop_reason = "viewer closed"
                     break
                 viewer.sync()
-                remaining_s = robot.sim_dt - (time.monotonic() - step_start)
-                if remaining_s > 0.0:
-                    time.sleep(remaining_s)
+                if args.viewer_speed is not None:
+                    remaining_s = robot.sim_dt / args.viewer_speed - (time.perf_counter() - step_start)
+                    if remaining_s > 0.0:
+                        time.sleep(remaining_s)
     except KeyboardInterrupt:
         stop_reason = "interrupted by operator"
     finally:

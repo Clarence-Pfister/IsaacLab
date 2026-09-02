@@ -954,6 +954,12 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
+        "--viewer_speed",
+        type=float,
+        default=None,
+        help="Pace an active viewer at this multiple of real time; omitted runs unpaced.",
+    )
+    parser.add_argument(
         "--emulate_velocity_limit",
         action="store_true",
         help="Emulate manifest actuator velocity limits with torque-speed saturation.",
@@ -1025,6 +1031,8 @@ def _parse_args() -> argparse.Namespace:
         parser.error("--action_sequence requires --cross-check.")
     if args.emulate_velocity_limit and args.clamp_joint_velocity:
         parser.error("--emulate_velocity_limit cannot be combined with diagnostic --clamp_joint_velocity.")
+    if args.viewer_speed is not None and (not math.isfinite(args.viewer_speed) or args.viewer_speed <= 0.0):
+        parser.error("--viewer_speed must be a positive finite multiplier.")
     return args
 
 
@@ -1368,7 +1376,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 - one validated simulat
         viewer = mujoco_viewer.launch_passive(model, data)
     try:
         for sim_step in range(total_sim_steps):
-            step_start = time.monotonic()
+            step_start = time.perf_counter()
             if sim_step > 0 and sim_step % manifest.decimation == 0:
                 policy_step = sim_step // manifest.decimation
                 process_policy_tick(policy_step)
@@ -1430,9 +1438,10 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901 - one validated simulat
                 if not viewer.is_running():
                     raise RuntimeError("Viewer closed before the requested simulation completed.")
                 viewer.sync()
-                remaining = manifest.sim_dt - (time.monotonic() - step_start)
-                if remaining > 0.0:
-                    time.sleep(remaining)
+                if args.viewer_speed is not None:
+                    remaining = manifest.sim_dt / args.viewer_speed - (time.perf_counter() - step_start)
+                    if remaining > 0.0:
+                        time.sleep(remaining)
     finally:
         if viewer is not None:
             viewer.close()
