@@ -15,6 +15,7 @@ import math
 import os
 import sys
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -25,15 +26,18 @@ from packaging import version
 from isaaclab_tasks.utils import add_launcher_args, launch_simulation, setup_preset_cli
 from isaaclab_tasks.utils.hydra import hydra_task_config
 
-from scripts.g1_jump_deploy.export.contract import goal_command_contract, validate_joint_name_contract
+from scripts.g1_jump_deploy.export.contract import (
+    deployment_table_filenames,
+    goal_command_contract,
+    validate_deployment_table_shapes,
+    validate_joint_name_contract,
+)
 
 _DEFAULT_TASK = "Isaac-Velocity-Jump-G1-Stage3-v0"
 _AGENT_CFG_ENTRY_POINT = "rsl_rl_cfg_entry_point"
 _POLICY_FILENAME = "policy.pt"
 _ONNX_FILENAME = "policy.onnx"
 _MANIFEST_FILENAME = "deploy_manifest.json"
-_REFERENCE_PREVIEW_FILENAME = "reference_preview_152x70.npy"
-_JUMP_PHASE_FILENAME = "jump_phase_152x6.npy"
 _EQUIVALENCE_SAMPLE_COUNT = 1000
 _EQUIVALENCE_TOLERANCE = 1.0e-5
 
@@ -283,9 +287,15 @@ def _generate_reference_data(
             phase = phase_func(env, **phase_cfg.params)[0]
             frame_phase_ids.append(int(torch.argmax(phase).item()))
 
-        phase_names_by_range = phase_func.__globals__.get("JUMP_PHASES")
-        if not isinstance(phase_names_by_range, dict):
+        # The phase table is a per-task setting, so resolve it through the observation
+        # module's accessor rather than a module-level constant, which only describes the
+        # default reference clip.
+        phase_table_accessor = phase_func.__globals__.get("get_jump_phases")
+        if not callable(phase_table_accessor):
             raise RuntimeError("Unable to resolve jump phase names from the configured observation function.")
+        phase_names_by_range = phase_table_accessor(env)
+        if not isinstance(phase_names_by_range, Mapping):
+            raise RuntimeError(f"Configured jump phase table must be a mapping, got {type(phase_names_by_range)!r}.")
         phase_names = list(phase_names_by_range)
         phase_frame_ranges = []
         for phase_id, phase_name in enumerate(phase_names):
@@ -539,6 +549,7 @@ def _build_manifest(
     observation_terms: list[dict[str, Any]],
     observation_cfgs: dict[str, Any],
     reference: dict[str, Any],
+    table_filenames: tuple[str, str],
 ) -> tuple[dict[str, Any], bool]:
     """Build a deployment manifest entirely from resolved runtime objects."""
     import torch
@@ -749,8 +760,8 @@ def _build_manifest(
             },
         },
         "tables": {
-            "reference_preview": _REFERENCE_PREVIEW_FILENAME,
-            "jump_phase": _JUMP_PHASE_FILENAME,
+            "reference_preview": table_filenames[0],
+            "jump_phase": table_filenames[1],
         },
     }
     return manifest, joint_order_matches_constants
@@ -767,30 +778,32 @@ def _validate_runtime_contract(
     action_dim = int(env.action_manager.get_term("joint_pos").action_dim)
     episode_steps = int(env.max_episode_length)
     preview_dim = next(term["step_dim"] for term in observation_terms if term["name"] == "reference_preview")
-    phase_dim = next(term["step_dim"] for term in observation_terms if term["name"] == "jump_phase")
+    phase_count = len(env.cfg.jump_phases)
     if not math.isclose(float(env.step_dt), 0.02, rel_tol=0.0, abs_tol=1.0e-12):
         raise RuntimeError(f"Deployment tables require a 0.02 s policy step, got {env.step_dt}.")
     if observation_dim != 326 or action_dim != 23:
         raise RuntimeError(
             f"Deployment schema requires observation/action dimensions 326/23, got {observation_dim}/{action_dim}."
         )
-    if reference_preview.shape != (episode_steps, preview_dim) or reference_preview.shape != (152, 70):
-        raise RuntimeError(f"Reference preview must have shape (152, 70), got {reference_preview.shape}.")
-    if jump_phase.shape != (episode_steps, phase_dim) or jump_phase.shape != (152, 6):
-        raise RuntimeError(f"Jump phase must have shape (152, 6), got {jump_phase.shape}.")
+    validate_deployment_table_shapes(
+        reference_preview.shape,
+        jump_phase.shape,
+        episode_steps,
+        preview_dim,
+        phase_count,
+    )
     if reference_preview.dtype != np.float32 or jump_phase.dtype != np.float32:
         raise RuntimeError("Precomputed deployment tables must use float32.")
 
 
-def _publish_bundle(staging_dir: Path, output_dir: Path) -> None:
+def _publish_bundle(staging_dir: Path, output_dir: Path, table_filenames: tuple[str, str]) -> None:
     """Publish all validated bundle files from the staging directory."""
     output_dir.mkdir(parents=True, exist_ok=True)
     for filename in (
         _POLICY_FILENAME,
         _ONNX_FILENAME,
         _MANIFEST_FILENAME,
-        _REFERENCE_PREVIEW_FILENAME,
-        _JUMP_PHASE_FILENAME,
+        *table_filenames,
     ):
         os.replace(staging_dir / filename, output_dir / filename)
 
@@ -843,6 +856,7 @@ def _run_export(env_cfg, agent_cfg, args_cli: argparse.Namespace) -> None:
             base_env, observation_terms, observation_cfgs
         )
         _validate_runtime_contract(base_env, observation_dim, observation_terms, reference_preview, jump_phase)
+        table_filenames = deployment_table_filenames(reference_preview.shape, jump_phase.shape)
         manifest, joint_order_matches_constants = _build_manifest(
             base_env,
             args_cli.task,
@@ -851,17 +865,18 @@ def _run_export(env_cfg, agent_cfg, args_cli: argparse.Namespace) -> None:
             observation_terms,
             observation_cfgs,
             reference,
+            table_filenames,
         )
 
         with tempfile.TemporaryDirectory(prefix=".g1-jump-export-", dir=output_dir.parent) as temporary_directory:
             staging_dir = Path(temporary_directory)
             _export_policy(runner, staging_dir, installed_rsl_rl_version)
-            np.save(staging_dir / _REFERENCE_PREVIEW_FILENAME, reference_preview, allow_pickle=False)
-            np.save(staging_dir / _JUMP_PHASE_FILENAME, jump_phase, allow_pickle=False)
+            np.save(staging_dir / table_filenames[0], reference_preview, allow_pickle=False)
+            np.save(staging_dir / table_filenames[1], jump_phase, allow_pickle=False)
             with (staging_dir / _MANIFEST_FILENAME).open("w", encoding="utf-8") as file:
                 json.dump(manifest, file, indent=2, allow_nan=False)
                 file.write("\n")
-            _publish_bundle(staging_dir, output_dir)
+            _publish_bundle(staging_dir, output_dir, table_filenames)
         _numeric_equivalence_gate(
             runner,
             output_dir / _POLICY_FILENAME,

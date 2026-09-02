@@ -8,6 +8,55 @@
 from collections.abc import Mapping, Sequence
 
 
+def deployment_table_filenames(
+    reference_preview_shape: Sequence[int], jump_phase_shape: Sequence[int]
+) -> tuple[str, str]:
+    """Derive deployment table filenames from their shapes.
+
+    Args:
+        reference_preview_shape: Reference-preview table shape.
+        jump_phase_shape: Jump-phase table shape.
+
+    Returns:
+        Reference-preview and jump-phase filenames.
+    """
+    reference_steps, preview_dim = reference_preview_shape
+    phase_steps, phase_count = jump_phase_shape
+    return (
+        f"reference_preview_{reference_steps}x{preview_dim}.npy",
+        f"jump_phase_{phase_steps}x{phase_count}.npy",
+    )
+
+
+def validate_deployment_table_shapes(
+    reference_preview_shape: Sequence[int],
+    jump_phase_shape: Sequence[int],
+    episode_steps: int,
+    preview_dim: int,
+    phase_count: int,
+) -> None:
+    """Validate deployment table shapes against the resolved task contract.
+
+    Args:
+        reference_preview_shape: Actual reference-preview table shape.
+        jump_phase_shape: Actual jump-phase table shape.
+        episode_steps: Number of policy steps in one episode.
+        preview_dim: Number of reference-preview values per policy step.
+        phase_count: Number of configured jump phases.
+
+    Raises:
+        RuntimeError: If either table has an unexpected shape.
+    """
+    expected_preview_shape = (episode_steps, preview_dim)
+    actual_preview_shape = tuple(reference_preview_shape)
+    if actual_preview_shape != expected_preview_shape:
+        raise RuntimeError(f"Reference preview must have shape {expected_preview_shape}, got {actual_preview_shape}.")
+    expected_phase_shape = (episode_steps, phase_count)
+    actual_phase_shape = tuple(jump_phase_shape)
+    if actual_phase_shape != expected_phase_shape:
+        raise RuntimeError(f"Jump phase must have shape {expected_phase_shape}, got {actual_phase_shape}.")
+
+
 def goal_command_contract(
     function_name: str,
     params: Mapping[str, object] | None = None,
