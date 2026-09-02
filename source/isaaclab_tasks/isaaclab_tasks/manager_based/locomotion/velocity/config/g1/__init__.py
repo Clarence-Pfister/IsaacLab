@@ -201,6 +201,21 @@ for range_name in ("020", "040", "060", "080", "100"):
     )
 
 
+for range_name in ("020", "040"):
+    gym.register(
+        id=f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-RangeContactTrigger{range_name}-v0",
+        entry_point="isaaclab.envs:ManagerBasedRLEnv",
+        disable_env_checker=True,
+        kwargs={
+            "env_cfg_entry_point": (
+                f"{__name__}.jump.jump_env_cfg:"
+                f"G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger{range_name}EnvCfg"
+            ),
+            "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:G1JumpFineTunePPORunnerCfg",
+        },
+    )
+
+
 gym.register(
     id="Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Narrow-Handoff-v0",
     entry_point="isaaclab.envs:ManagerBasedRLEnv",

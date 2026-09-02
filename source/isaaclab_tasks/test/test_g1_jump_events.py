@@ -6,6 +6,8 @@
 from __future__ import annotations
 
 import math
+import re
+from types import SimpleNamespace
 
 import torch
 
@@ -28,11 +30,98 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.mdp.events 
     _full_episode_mask,
     _sample_retrigger_mask,
     _terminal_state_is_retriggerable,
+    perturb_trigger_state,
     reference_or_terminal_state_initialization,
 )
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.mdp.observations import (
     obs_goal_command_remaining_orientation_retrigger,
 )
+
+
+def test_trigger_state_perturbation_updates_only_the_selected_environments() -> None:
+    joint_names = (
+        "left_hip_pitch_joint",
+        "left_hip_roll_joint",
+        "left_hip_yaw_joint",
+        "left_knee_joint",
+        "left_ankle_pitch_joint",
+        "left_ankle_roll_joint",
+        "right_hip_pitch_joint",
+        "right_hip_roll_joint",
+        "right_hip_yaw_joint",
+        "right_knee_joint",
+        "right_ankle_pitch_joint",
+        "right_ankle_roll_joint",
+        "waist_yaw_joint",
+    )
+
+    class FakeArticulation:
+        def __init__(self):
+            root_pose = torch.zeros((3, 7))
+            root_pose[:, 2] = 0.75
+            root_pose[:, 6] = 1.0
+            self.data = SimpleNamespace(
+                joint_pos=SimpleNamespace(torch=torch.zeros((3, len(joint_names)))),
+                joint_vel=SimpleNamespace(torch=torch.zeros((3, len(joint_names)))),
+                root_link_pose_w=SimpleNamespace(torch=root_pose),
+            )
+            self.writes: dict[str, tuple[torch.Tensor, torch.Tensor]] = {}
+
+        def find_joints(self, pattern: str) -> tuple[list[int], list[str]]:
+            indices = [index for index, name in enumerate(joint_names) if re.fullmatch(pattern, name)]
+            return indices, [joint_names[index] for index in indices]
+
+        def write_joint_position_to_sim_index(self, *, position: torch.Tensor, env_ids: torch.Tensor) -> None:
+            self.writes["joint_pos"] = (position.clone(), env_ids.clone())
+
+        def write_joint_velocity_to_sim_index(self, *, velocity: torch.Tensor, env_ids: torch.Tensor) -> None:
+            self.writes["joint_vel"] = (velocity.clone(), env_ids.clone())
+
+        def write_root_pose_to_sim_index(self, *, root_pose: torch.Tensor, env_ids: torch.Tensor) -> None:
+            self.writes["root_pose"] = (root_pose.clone(), env_ids.clone())
+
+    torch.manual_seed(7)
+    asset = FakeArticulation()
+    env = SimpleNamespace(scene={"robot": asset})
+    env_ids = torch.tensor((0, 2))
+    perturb_trigger_state(env, env_ids)
+
+    joint_pos, joint_pos_env_ids = asset.writes["joint_pos"]
+    joint_vel, joint_vel_env_ids = asset.writes["joint_vel"]
+    root_pose, root_pose_env_ids = asset.writes["root_pose"]
+    assert torch.equal(joint_pos_env_ids, env_ids)
+    assert torch.equal(joint_vel_env_ids, env_ids)
+    assert torch.equal(root_pose_env_ids, env_ids)
+
+    leg_joint_ids = [*range(4), *range(6, 10)]
+    ankle_pitch_joint_ids = [4, 10]
+    ankle_roll_joint_ids = [5, 11]
+    assert torch.all(torch.abs(joint_pos[:, leg_joint_ids]) <= 0.05)
+    assert torch.count_nonzero(joint_pos[:, leg_joint_ids]) == 2 * len(leg_joint_ids)
+    torch.testing.assert_close(joint_pos[:, ankle_pitch_joint_ids[0]], joint_pos[:, ankle_pitch_joint_ids[1]])
+    assert torch.all(torch.abs(joint_pos[:, ankle_pitch_joint_ids]) <= 0.15)
+    assert torch.all(torch.abs(joint_pos[:, ankle_roll_joint_ids]) <= 0.03)
+    assert torch.count_nonzero(joint_pos[:, ankle_roll_joint_ids]) == 2 * len(ankle_roll_joint_ids)
+    torch.testing.assert_close(joint_pos[:, 12], torch.zeros(2))
+    assert torch.all(torch.abs(joint_vel) <= 0.1)
+    assert torch.count_nonzero(joint_vel) == joint_vel.numel()
+
+    assert torch.all((root_pose[:, 2] >= 0.75) & (root_pose[:, 2] <= 0.76))
+    torch.testing.assert_close(torch.linalg.vector_norm(root_pose[:, 3:7], dim=-1), torch.ones(2))
+    roll = torch.atan2(
+        2.0 * (root_pose[:, 6] * root_pose[:, 3] + root_pose[:, 4] * root_pose[:, 5]),
+        1.0 - 2.0 * (root_pose[:, 3].square() + root_pose[:, 4].square()),
+    )
+    pitch = torch.asin(
+        torch.clamp(2.0 * (root_pose[:, 6] * root_pose[:, 4] - root_pose[:, 5] * root_pose[:, 3]), -1.0, 1.0)
+    )
+    yaw = torch.atan2(
+        2.0 * (root_pose[:, 6] * root_pose[:, 5] + root_pose[:, 3] * root_pose[:, 4]),
+        1.0 - 2.0 * (root_pose[:, 4].square() + root_pose[:, 5].square()),
+    )
+    assert torch.all(torch.abs(roll) <= math.radians(1.5))
+    assert torch.all(torch.abs(pitch) <= math.radians(3.0))
+    torch.testing.assert_close(yaw, torch.zeros(2), atol=1.0e-7, rtol=0.0)
 
 
 def test_terminal_retrigger_filter_rejects_unsafe_landing_states() -> None:

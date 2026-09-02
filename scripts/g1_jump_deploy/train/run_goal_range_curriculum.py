@@ -57,9 +57,9 @@ _STAGE_FAMILIES = {
             range_code=range_code,
             task=f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Range{task_variant}{range_code}-v0",
         )
-        for range_code in _RANGE_CODES
+        for range_code in (("020", "040") if variant == "contact_trigger" else _RANGE_CODES)
     )
-    for variant, task_variant in (("plain", ""), ("contact", "Contact"))
+    for variant, task_variant in (("plain", ""), ("contact", "Contact"), ("contact_trigger", "ContactTrigger"))
 }
 _SUCCESS_ROW = re.compile(r"^\s*(0\.10|0\.20)\s+(\d+)\s+(\d+)\s+([0-9.]+)%", re.MULTILINE)
 _UPRIGHT_ROW = re.compile(r"upright at episode end .*?:\s*(\d+)/(\d+)\s+\(([0-9.]+)%\)")
@@ -75,8 +75,8 @@ def _create_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--stages",
         nargs="+",
-        default=list(_RANGE_CODES),
-        help="Stages to run in curriculum order, as space- or comma-separated range codes (default: all).",
+        default=None,
+        help="Stages to run in curriculum order, as space- or comma-separated range codes (default: all available).",
     )
     parser.add_argument(
         "--variant",
@@ -114,11 +114,13 @@ def _create_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _selected_stages(values: list[str], variant: str) -> list[Stage]:
+def _selected_stages(values: list[str] | None, variant: str) -> list[Stage]:
+    stages = _STAGE_FAMILIES[variant]
+    if values is None:
+        return list(stages)
     requested = []
     for value in values:
         requested.extend(item.strip().lower().removeprefix("range") for item in value.split(",") if item.strip())
-    stages = _STAGE_FAMILIES[variant]
     known_codes = {stage.range_code for stage in stages}
     unknown = sorted(set(requested) - known_codes)
     if unknown:

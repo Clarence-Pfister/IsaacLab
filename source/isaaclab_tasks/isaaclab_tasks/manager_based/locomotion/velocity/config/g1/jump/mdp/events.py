@@ -115,6 +115,92 @@ def reference_state_initialization(
         asset.write_root_velocity_to_sim_index(root_velocity=default_root_vel, env_ids=std_env_ids)
 
 
+def perturb_trigger_state(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    leg_joint_pos_noise_rad: float = 0.05,
+    ankle_pitch_offset_range_rad: tuple[float, float] = (-0.15, 0.15),
+    ankle_roll_noise_rad: float = 0.03,
+    root_pitch_noise_rad: float = math.radians(3.0),
+    root_roll_noise_rad: float = math.radians(1.5),
+    root_height_offset_range_m: tuple[float, float] = (0.0, 0.01),
+    joint_vel_noise_rad_s: float = 0.1,
+) -> None:
+    """Perturb the post-reset robot state seen when a deployment jump is triggered.
+
+    Root roll and pitch offsets are applied about the current body axes, without
+    adding a yaw rotation. The same sampled ankle-pitch offset is applied to both
+    legs in each environment.
+
+    Args:
+        env: Environment in which to perturb the robot.
+        env_ids: Environment indices to perturb.
+        asset_cfg: Robot asset configuration.
+        leg_joint_pos_noise_rad: Maximum absolute hip and knee position noise [rad].
+        ankle_pitch_offset_range_rad: Common bilateral ankle-pitch offset range [rad].
+        ankle_roll_noise_rad: Maximum absolute ankle-roll position noise [rad].
+        root_pitch_noise_rad: Maximum absolute root pitch noise [rad].
+        root_roll_noise_rad: Maximum absolute root roll noise [rad].
+        root_height_offset_range_m: Non-negative root height offset range [m].
+        joint_vel_noise_rad_s: Maximum absolute joint velocity noise [rad/s].
+
+    Raises:
+        ValueError: If a noise magnitude or range is invalid.
+    """
+    noise_magnitudes = {
+        "leg_joint_pos_noise_rad": leg_joint_pos_noise_rad,
+        "ankle_roll_noise_rad": ankle_roll_noise_rad,
+        "root_pitch_noise_rad": root_pitch_noise_rad,
+        "root_roll_noise_rad": root_roll_noise_rad,
+        "joint_vel_noise_rad_s": joint_vel_noise_rad_s,
+    }
+    for name, magnitude in noise_magnitudes.items():
+        if not math.isfinite(magnitude) or magnitude < 0.0:
+            raise ValueError(f"{name} must be finite and non-negative, got {magnitude}.")
+    for name, value_range in {
+        "ankle_pitch_offset_range_rad": ankle_pitch_offset_range_rad,
+        "root_height_offset_range_m": root_height_offset_range_m,
+    }.items():
+        if len(value_range) != 2 or not all(math.isfinite(value) for value in value_range):
+            raise ValueError(f"{name} must contain two finite values, got {value_range}.")
+        if value_range[0] > value_range[1]:
+            raise ValueError(f"{name} must be ordered, got {value_range}.")
+    if root_height_offset_range_m[0] < 0.0:
+        raise ValueError(f"root_height_offset_range_m must never lower the root; got {root_height_offset_range_m}.")
+    if len(env_ids) == 0:
+        return
+
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_pos = asset.data.joint_pos.torch[env_ids].clone()
+    joint_vel = asset.data.joint_vel.torch[env_ids].clone()
+    root_pose = asset.data.root_link_pose_w.torch[env_ids].clone()
+
+    leg_joint_ids, _ = asset.find_joints(".*_(hip|knee).*_joint")
+    ankle_pitch_joint_ids, _ = asset.find_joints(".*_ankle_pitch_joint")
+    ankle_roll_joint_ids, _ = asset.find_joints(".*_ankle_roll_joint")
+
+    joint_pos[:, leg_joint_ids] += joint_pos.new_empty((len(env_ids), len(leg_joint_ids))).uniform_(
+        -leg_joint_pos_noise_rad, leg_joint_pos_noise_rad
+    )
+    ankle_pitch_offset = joint_pos.new_empty((len(env_ids), 1)).uniform_(*ankle_pitch_offset_range_rad)
+    joint_pos[:, ankle_pitch_joint_ids] += ankle_pitch_offset
+    joint_pos[:, ankle_roll_joint_ids] += joint_pos.new_empty((len(env_ids), len(ankle_roll_joint_ids))).uniform_(
+        -ankle_roll_noise_rad, ankle_roll_noise_rad
+    )
+    joint_vel += joint_vel.new_empty(joint_vel.shape).uniform_(-joint_vel_noise_rad_s, joint_vel_noise_rad_s)
+
+    roll = root_pose.new_empty(len(env_ids)).uniform_(-root_roll_noise_rad, root_roll_noise_rad)
+    pitch = root_pose.new_empty(len(env_ids)).uniform_(-root_pitch_noise_rad, root_pitch_noise_rad)
+    attitude_offset = quat_from_euler_xyz(roll, pitch, torch.zeros_like(roll))
+    root_pose[:, 3:7] = normalize(quat_mul(root_pose[:, 3:7], attitude_offset))
+    root_pose[:, 2] += root_pose.new_empty(len(env_ids)).uniform_(*root_height_offset_range_m)
+
+    asset.write_joint_position_to_sim_index(position=joint_pos, env_ids=env_ids)
+    asset.write_joint_velocity_to_sim_index(velocity=joint_vel, env_ids=env_ids)
+    asset.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
+
+
 def _terminal_state_is_retriggerable(
     root_pos: torch.Tensor,
     root_quat: torch.Tensor,

@@ -8,6 +8,7 @@
 from .actions_cfg import LowPassJointPositionActionCfg
 from .commands import JumpGoalCommand, JumpGoalCommandCfg
 from .events import (
+    perturb_trigger_state,
     randomize_contact_compliance,
     reference_or_terminal_state_initialization,
     reference_state_initialization,

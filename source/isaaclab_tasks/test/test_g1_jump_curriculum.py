@@ -47,6 +47,8 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.jump_env_cf
     G1JumpStage2DeployLongitudinalSmoothRangeContact060EnvCfg,
     G1JumpStage2DeployLongitudinalSmoothRangeContact080EnvCfg,
     G1JumpStage2DeployLongitudinalSmoothRangeContact100EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger020EnvCfg,
+    G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger040EnvCfg,
     G1JumpStage2DeployLongitudinalUniformEnvCfg,
     G1JumpStage2DeployTranslationEnvCfg,
     G1JumpStage2EnvCfg,
@@ -54,7 +56,10 @@ from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.jump_env_cf
     G1JumpStage3DeployTranslationEnvCfg,
     G1JumpStage3NarrowEnvCfg,
 )
-from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.mdp.events import randomize_contact_compliance
+from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.mdp.events import (
+    perturb_trigger_state,
+    randomize_contact_compliance,
+)
 from isaaclab_tasks.manager_based.locomotion.velocity.config.g1.jump.mdp.observations import (
     obs_goal_command_remaining_orientation,
     obs_goal_remaining,
@@ -359,20 +364,37 @@ def test_goal_range_curriculum_tasks_use_fine_tune_runner(range_code: str, range
     assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G1JumpFineTunePPORunnerCfg")
 
 
+@pytest.mark.parametrize("range_code", ("020", "040"))
+def test_goal_range_contact_trigger_tasks_use_fine_tune_runner(range_code: str) -> None:
+    task_id = f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-RangeContactTrigger{range_code}-v0"
+    spec = gym.spec(task_id)
+
+    assert spec.kwargs["env_cfg_entry_point"].endswith(
+        f":G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger{range_code}EnvCfg"
+    )
+    assert spec.kwargs["rsl_rl_cfg_entry_point"].endswith(":G1JumpFineTunePPORunnerCfg")
+
+
 @pytest.mark.parametrize(
-    ("variant_args", "range_variant", "selection_key", "minimum_response_gain"),
+    ("variant_args", "range_variant", "range_codes", "selection_key", "minimum_response_gain"),
     (
-        ([], "", "success_rate_0p10", "0.85"),
+        ([], "", ("020", "040", "060", "080", "100"), "success_rate_0p10", "0.85"),
         (
             ["--variant", "contact", "--selection_tolerance_m", "0.20", "--minimum_response_gain", "0.90"],
             "Contact",
+            ("020", "040", "060", "080", "100"),
             "success_rate_0p20",
             "0.9",
         ),
+        (["--variant", "contact_trigger"], "ContactTrigger", ("020", "040"), "success_rate_0p10", "0.85"),
     ),
 )
 def test_goal_range_curriculum_driver_dry_run_prints_every_stage(
-    variant_args: list[str], range_variant: str, selection_key: str, minimum_response_gain: str
+    variant_args: list[str],
+    range_variant: str,
+    range_codes: tuple[str, ...],
+    selection_key: str,
+    minimum_response_gain: str,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[3]
     driver = repo_root / "scripts" / "g1_jump_deploy" / "train" / "run_goal_range_curriculum.py"
@@ -385,18 +407,18 @@ def test_goal_range_curriculum_driver_dry_run_prints_every_stage(
         text=True,
     )
 
-    for range_code in ("020", "040", "060", "080", "100"):
+    for range_code in range_codes:
         task_id = f"Isaac-Velocity-Jump-G1-Stage2-Deploy-Longitudinal-Smooth-Range{range_variant}{range_code}-v0"
         assert result.stdout.count(task_id) == 2
-    assert result.stdout.count("scripts/reinforcement_learning/rsl_rl/train.py") == 5
-    assert result.stdout.count("scripts/g1_jump_deploy/eval/eval_success_rate.py") == 5
+    assert result.stdout.count("scripts/reinforcement_learning/rsl_rl/train.py") == len(range_codes)
+    assert result.stdout.count("scripts/g1_jump_deploy/eval/eval_success_rate.py") == len(range_codes)
     assert "--load_checkpoint model_825.pt" in result.stdout
     assert (
         f"# Select by {selection_key} with upright_rate >= 0.99, "
         f"response_gain_xx >= {minimum_response_gain}, correlation_x >= 0.95"
     ) in result.stdout
     if range_variant:
-        assert "--run_name rangecontact020_from825" in result.stdout
+        assert f"--run_name range{range_variant.lower()}020_from825" in result.stdout
 
 
 def test_goal_range_curriculum_driver_selects_requested_tolerance_and_later_tie(tmp_path: Path) -> None:
@@ -520,6 +542,46 @@ def test_goal_range_contact_curriculum_adds_only_contact_and_requested_actor_noi
         assert contact_noise.to_dict() == robust_noise.to_dict()
     assert contact.observations.policy.joint_pos.noise is plain.observations.policy.joint_pos.noise
     assert contact.observations.policy.goal_remaining.noise is plain.observations.policy.goal_remaining.noise
+
+
+@pytest.mark.parametrize(
+    ("contact_type", "trigger_type"),
+    (
+        (
+            G1JumpStage2DeployLongitudinalSmoothRangeContact020EnvCfg,
+            G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger020EnvCfg,
+        ),
+        (
+            G1JumpStage2DeployLongitudinalSmoothRangeContact040EnvCfg,
+            G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger040EnvCfg,
+        ),
+    ),
+)
+def test_goal_range_contact_trigger_curriculum_adds_only_the_post_reference_reset_event(
+    contact_type: type, trigger_type: type
+) -> None:
+    contact = contact_type()
+    trigger = trigger_type()
+
+    contact_dict = contact.to_dict()
+    trigger_dict = trigger.to_dict()
+    contact_events = contact_dict.pop("events")
+    trigger_events = trigger_dict.pop("events")
+    perturb_event = trigger_events.pop("perturb_trigger_state")
+
+    assert trigger_dict == contact_dict
+    assert trigger_events == contact_events
+    assert trigger.events.perturb_trigger_state.func is perturb_trigger_state
+    assert perturb_event["mode"] == "reset"
+    assert perturb_event["params"]["leg_joint_pos_noise_rad"] == 0.05
+    assert perturb_event["params"]["ankle_pitch_offset_range_rad"] == (-0.15, 0.15)
+    assert perturb_event["params"]["ankle_roll_noise_rad"] == 0.03
+    assert perturb_event["params"]["root_pitch_noise_rad"] == pytest.approx(math.radians(3.0))
+    assert perturb_event["params"]["root_roll_noise_rad"] == pytest.approx(math.radians(1.5))
+    assert perturb_event["params"]["root_height_offset_range_m"] == (0.0, 0.01)
+    assert perturb_event["params"]["joint_vel_noise_rad_s"] == 0.1
+    event_names = list(trigger.events.__dict__)
+    assert event_names.index("reset_to_reference") < event_names.index("perturb_trigger_state")
 
 
 def test_longitudinal_odometry_smooth_narrow_curriculum_retains_live_feedback() -> None:

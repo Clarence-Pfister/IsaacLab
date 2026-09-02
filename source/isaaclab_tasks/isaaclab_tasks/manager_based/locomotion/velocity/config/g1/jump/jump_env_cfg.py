@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from isaaclab_physx.physics import PhysxCfg
 
@@ -57,6 +59,7 @@ from .mdp import (
     penalize_joint_acc,
     penalize_joint_vel,
     penalize_torque_consumption,
+    perturb_trigger_state,
     randomize_contact_compliance,
     reference_joint_target_deviation,
     reference_motion_complete,
@@ -1335,6 +1338,50 @@ class G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg(G1JumpStage2DeployL
         self.observations.policy.joint_vel.noise = UniformNoiseCfg(n_min=-1.0, n_max=1.0, operation="add")
         self.observations.policy.base_ang_vel.noise = UniformNoiseCfg(n_min=-0.3, n_max=0.3, operation="add")
         self.observations.policy.projected_gravity.noise = UniformNoiseCfg(n_min=-0.1, n_max=0.1, operation="add")
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContactTriggerEnvCfg(
+    G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg
+):
+    """Contact-robust range curriculum with randomized deployment trigger states."""
+
+    @configclass
+    class EventCfg(G1JumpStage2DeployLongitudinalSmoothRangeContactEnvCfg.EventCfg):
+        perturb_trigger_state = EventTerm(
+            func=perturb_trigger_state,
+            mode="reset",
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+                "leg_joint_pos_noise_rad": 0.05,
+                "ankle_pitch_offset_range_rad": (-0.15, 0.15),
+                "ankle_roll_noise_rad": 0.03,
+                "root_pitch_noise_rad": math.radians(3.0),
+                "root_roll_noise_rad": math.radians(1.5),
+                "root_height_offset_range_m": (0.0, 0.01),
+                "joint_vel_noise_rad_s": 0.1,
+            },
+        )
+
+    events: EventCfg = EventCfg()
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger020EnvCfg(
+    G1JumpStage2DeployLongitudinalSmoothRangeContactTriggerEnvCfg
+):
+    """Trigger-randomized contact curriculum with longitudinal goals [m] in [-0.2, 0.2]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.2, 0.2)
+
+
+@configclass
+class G1JumpStage2DeployLongitudinalSmoothRangeContactTrigger040EnvCfg(
+    G1JumpStage2DeployLongitudinalSmoothRangeContactTriggerEnvCfg
+):
+    """Trigger-randomized contact curriculum with longitudinal goals [m] in [-0.4, 0.4]."""
+
+    goal_pos_x_range: tuple[float, float] = (-0.4, 0.4)
 
 
 @configclass
