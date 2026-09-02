@@ -61,6 +61,9 @@ _STAGE_FAMILIES = {
     )
     for variant, task_variant in (("plain", ""), ("contact", "Contact"), ("contact_trigger", "ContactTrigger"))
 }
+_OVERALL_SUCCESS_TABLE = re.compile(
+    r"^[ \t]*Overall success[^\n]*\n(?P<table>.*?)(?:\n[ \t]*\n|\Z)", re.MULTILINE | re.DOTALL
+)
 _SUCCESS_ROW = re.compile(r"^\s*(0\.10|0\.20)\s+(\d+)\s+(\d+)\s+([0-9.]+)%", re.MULTILINE)
 _UPRIGHT_ROW = re.compile(r"upright at episode end .*?:\s*(\d+)/(\d+)\s+\(([0-9.]+)%\)")
 _FLOAT_PATTERN = r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?"
@@ -198,7 +201,11 @@ def _find_training_run(run_name: str, existing_runs: set[Path]) -> Path:
 
 
 def _parse_evaluation(output: str, checkpoint: Path) -> dict[str, object]:
-    success_matches = {float(match.group(1)): match.groups()[1:] for match in _SUCCESS_ROW.finditer(output)}
+    overall_success_match = _OVERALL_SUCCESS_TABLE.search(output)
+    overall_success_table = overall_success_match.group("table") if overall_success_match is not None else ""
+    success_matches = {
+        float(match.group(1)): match.groups()[1:] for match in _SUCCESS_ROW.finditer(overall_success_table)
+    }
     upright_match = _UPRIGHT_ROW.search(output)
     response_gain_match = _RESPONSE_GAIN_ROW.search(output)
     response_offset_match = _RESPONSE_OFFSET_ROW.search(output)

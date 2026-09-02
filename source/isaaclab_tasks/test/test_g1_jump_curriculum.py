@@ -438,8 +438,10 @@ def test_goal_range_curriculum_driver_selects_requested_tolerance_and_later_tie(
         correlation: float,
     ) -> dict[str, object]:
         output = f"""
+            Overall success (95% Wilson binomial confidence interval):
             0.10 {success_0p10} 100 {success_0p10:.2f}% [0.0%, 100.0%]
             0.20 {success_0p20} 100 {success_0p20:.2f}% [0.0%, 100.0%]
+
             response matrix = [[{response_gain:+.3f}, n/a], [n/a, n/a]]
             offset [m] = [+0.0110, +0.0000]
             same-axis Pearson correlation = [x {correlation:+.3f}, y n/a]
