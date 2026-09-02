@@ -141,6 +141,29 @@ def test_repeat_timeline_confirms_soon_after_policy_stand_preparation() -> None:
     assert second_confirm.time_s - second_start.time_s == pytest.approx(0.6)
 
 
+def test_repeat_timeline_mirrors_blend_out_hold_and_full_rearm() -> None:
+    goals = (JumpGoal(0.0, 0.0, 0.0), JumpGoal(-0.1, 0.0, 0.0))
+
+    timeline = _scenario_timeline(
+        "repeat",
+        goals[0],
+        {"pos_x": (-0.1, 0.1)},
+        policy_dt=0.02,
+        flight_start_step=43,
+        start_time_s=0.5,
+        confirm_time_s=5.8,
+        repeat_goals=goals,
+        episode_steps=152,
+        blend_out_duration_s=5.0,
+        stand_hold_duration_s=1.0,
+        repeat_arm_duration_s=5.0,
+    )
+
+    first_confirm, second_start, second_confirm = timeline[1:]
+    assert second_start.time_s - first_confirm.time_s == pytest.approx(152 * 0.02 + 5.0 + 1.0)
+    assert second_confirm.time_s - second_start.time_s == pytest.approx(5.0 + 0.35)
+
+
 def test_repeat_goals_default_to_full_longitudinal_envelope() -> None:
     primary = JumpGoal(0.02, 0.0, 0.0)
 
@@ -238,6 +261,8 @@ def test_upright_hold_audit_rejects_soft_hips_and_accepts_ground_overrides(monke
             "6.0",
             "--confirm_time_s",
             "8.8",
+            "--policy_prepare_duration_s",
+            "0.0",
             "--stand_ankle_stiffness",
             "80.0",
             "--stand_ankle_damping",
@@ -505,8 +530,14 @@ def test_unmeasured_ground_cli_keeps_ground_envelope(monkeypatch) -> None:
 
     assert args.unmeasured_ground_validation
     assert not args.contactless_gantry_rehearsal
+    assert args.blend_in_duration_s == pytest.approx(0.0)
+    assert args.blend_out_duration_s == pytest.approx(5.0)
+    assert args.stand_hold_duration_s == pytest.approx(1.0)
     assert args.policy_prepare_duration_s == pytest.approx(0.0)
+    assert args.policy_stand_retrigger_prepare_duration_s == pytest.approx(0.0)
+    assert args.settle_timeout_s == pytest.approx(7.0)
     assert args.confirm_time_s == pytest.approx(2.8)
+    assert not args.policy_prepare_retain_balance
 
 
 def test_unmeasured_ground_cli_accepts_repeat_goal_sequence(monkeypatch) -> None:
@@ -530,6 +561,59 @@ def test_unmeasured_ground_cli_accepts_repeat_goal_sequence(monkeypatch) -> None
     args = _parse_args()
 
     assert args.repeat_goal_pos_x == pytest.approx([-0.1, 0.0, 0.1])
+
+
+@pytest.mark.parametrize("option", ("--stand_hold_duration_s",))
+def test_unmeasured_ground_cli_rejects_non_positive_session_durations(monkeypatch, option: str) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["run_fsm_mujoco.py", "--scenario", "repeat", "--unmeasured_ground_validation", option, "0"],
+    )
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize("option", ("--blend_in_duration_s", "--blend_out_duration_s"))
+def test_unmeasured_ground_cli_accepts_zero_blend_and_balance_retention(monkeypatch, option: str) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_fsm_mujoco.py",
+            "--scenario",
+            "repeat",
+            "--unmeasured_ground_validation",
+            option,
+            "0",
+            "--policy_prepare_retain_balance",
+        ],
+    )
+
+    args = _parse_args()
+
+    assert getattr(args, option.removeprefix("--")) == 0.0
+    assert args.policy_prepare_retain_balance
+
+
+@pytest.mark.parametrize("option", ("--blend_in_duration_s", "--blend_out_duration_s"))
+def test_unmeasured_ground_cli_rejects_negative_blend(monkeypatch, option: str) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_fsm_mujoco.py",
+            "--scenario",
+            "repeat",
+            "--unmeasured_ground_validation",
+            option,
+            "-0.1",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        _parse_args()
 
 
 def test_jump_handoff_cli_accepts_independent_step_counts(monkeypatch) -> None:

@@ -38,6 +38,7 @@ from scripts.g1_jump_deploy.hardware.run_fsm_g1 import (
     _G1Robot,
     _GantryRehearsalOperator,
     _ground_stand_configuration,
+    _ground_stand_hold_complete,
     _GroundJumpRecorder,
     _InactivePolicy,
     _InteractiveGoalReader,
@@ -655,8 +656,33 @@ def test_ground_jump_goal_sequence_uses_manifest_range(monkeypatch, tmp_path: Pa
 
     assert [goal.dx for goal in args.ground_goals] == pytest.approx([0.0, 0.1, -0.1])
     assert all((goal.dy, goal.dyaw, goal.roll, goal.pitch) == (0.0, 0.0, 0.0, 0.0) for goal in args.ground_goals)
+    assert args.blend_in_duration_s == pytest.approx(0.0)
+    assert args.blend_out_duration_s == pytest.approx(5.0)
+    assert args.stand_hold_duration_s == pytest.approx(1.0)
 
     arguments[arguments.index("--goal_sequence") + 1] = "0.1001"
+    monkeypatch.setattr(sys, "argv", arguments)
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize("option", ("--stand_hold_duration_s",))
+def test_ground_jump_rejects_non_positive_session_durations(monkeypatch, tmp_path: Path, option: str) -> None:
+    arguments = _ground_jump_arguments(tmp_path) + [option, "0"]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    with pytest.raises(SystemExit):
+        _parse_args()
+
+
+@pytest.mark.parametrize("option", ("--blend_in_duration_s", "--blend_out_duration_s"))
+def test_ground_jump_accepts_zero_blend_and_rejects_negative(monkeypatch, tmp_path: Path, option: str) -> None:
+    arguments = _ground_jump_arguments(tmp_path) + [option, "0"]
+    monkeypatch.setattr(sys, "argv", arguments)
+
+    assert getattr(_parse_args(), option.removeprefix("--")) == 0.0
+
+    arguments[-1] = "-0.1"
     monkeypatch.setattr(sys, "argv", arguments)
     with pytest.raises(SystemExit):
         _parse_args()
@@ -673,6 +699,12 @@ def test_ground_jump_allows_two_jump_session_duration_but_keeps_a_ceiling(monkey
     monkeypatch.setattr(sys, "argv", arguments)
     with pytest.raises(SystemExit):
         _parse_args()
+
+
+def test_ground_repeat_waits_for_post_blend_stand_hold() -> None:
+    assert _ground_stand_hold_complete(10.0, None, 1.0)
+    assert not _ground_stand_hold_complete(10.99, 10.0, 1.0)
+    assert _ground_stand_hold_complete(11.0, 10.0, 1.0)
 
 
 def test_ground_jump_native_walkrun_exit_requires_native_stand(monkeypatch, tmp_path: Path) -> None:
@@ -1510,8 +1542,11 @@ def test_ground_recorder_writes_authorization_and_per_jump_outcome(monkeypatch, 
         balance_config,
         1.0,
         True,
+        3.0,
         0.5,
-        4.0,
+        5.0,
+        1.0,
+        7.0,
         0.05,
         0.02,
     )
@@ -1559,8 +1594,12 @@ def test_ground_recorder_writes_authorization_and_per_jump_outcome(monkeypatch, 
         "balance_target_entry_duration_s": 1.0,
         "joint_limit_abort_margin_rad": 0.02,
         "policy_stand_after_jump": True,
+        "policy_prepare_duration_s": 3.0,
+        "policy_prepare_retain_balance": True,
+        "jump_blend_out_duration_s": 5.0,
+        "stand_hold_duration_s": 1.0,
         "settle_duration_s": 0.5,
-        "settle_timeout_s": 4.0,
+        "settle_timeout_s": 7.0,
         "settle_joint_velocity_tolerance_rad_s": 0.05,
         "damping_overrides_nm_s_per_rad": {
             "left_hip_pitch_joint": 5.0,

@@ -109,6 +109,10 @@ _GROUND_STAND_ANKLE_DAMPING = 7.0
 _GROUND_STAND_ENTRY_DURATION_S = 1.0
 _GROUND_SETTLE_DURATION_S = 0.5
 _GROUND_SETTLE_TIMEOUT_S = 4.0
+_GROUND_BLEND_IN_DURATION_S = 0.0
+_GROUND_BLEND_OUT_DURATION_S = 5.0
+_GROUND_STAND_HOLD_DURATION_S = 1.0
+_GROUND_SETTLE_TIMEOUT_MARGIN_S = 2.0
 _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S = 0.05
 _GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD = 0.02
 _GROUND_BALANCE_INITIAL_ROLL_INTEGRAL = 0.0
@@ -584,7 +588,10 @@ class _GroundJumpRecorder(_RehearsalRecorder):
         balance_config: BalanceControllerConfig,
         stand_entry_duration_s: float,
         policy_stand_after_jump: bool,
+        policy_prepare_duration_s: float,
         settle_duration_s: float,
+        jump_blend_out_duration_s: float,
+        stand_hold_duration_s: float,
         settle_timeout_s: float,
         settle_joint_velocity_tolerance_rad_s: float,
         joint_limit_abort_margin_rad: float,
@@ -610,7 +617,10 @@ class _GroundJumpRecorder(_RehearsalRecorder):
         self._balance_config = balance_config
         self._stand_entry_duration_s = stand_entry_duration_s
         self._policy_stand_after_jump = policy_stand_after_jump
+        self._policy_prepare_duration_s = policy_prepare_duration_s
         self._settle_duration_s = settle_duration_s
+        self._jump_blend_out_duration_s = jump_blend_out_duration_s
+        self._stand_hold_duration_s = stand_hold_duration_s
         self._settle_timeout_s = settle_timeout_s
         self._settle_joint_velocity_tolerance_rad_s = settle_joint_velocity_tolerance_rad_s
         self._joint_limit_abort_margin_rad = joint_limit_abort_margin_rad
@@ -713,7 +723,11 @@ class _GroundJumpRecorder(_RehearsalRecorder):
             "stand_entry_duration_s": self._stand_entry_duration_s,
             "balance_target_entry_duration_s": self._stand_entry_duration_s,
             "policy_stand_after_jump": self._policy_stand_after_jump,
+            "policy_prepare_duration_s": self._policy_prepare_duration_s,
+            "policy_prepare_retain_balance": self._policy_prepare_duration_s > 0.0,
             "settle_duration_s": self._settle_duration_s,
+            "jump_blend_out_duration_s": self._jump_blend_out_duration_s,
+            "stand_hold_duration_s": self._stand_hold_duration_s,
             "settle_timeout_s": self._settle_timeout_s,
             "settle_joint_velocity_tolerance_rad_s": self._settle_joint_velocity_tolerance_rad_s,
             "joint_limit_abort_margin_rad": self._joint_limit_abort_margin_rad,
@@ -2301,6 +2315,12 @@ def _validate_ground_jump_args(parser: argparse.ArgumentParser, args: argparse.N
         parser.error("--ground_jump --exit_mode native_walkrun requires --entry_mode native_stand")
     if args.goal_sequence is None and not args.interactive_goals:
         parser.error("--ground_jump requires --goal_sequence and/or --interactive_goals")
+    for name in ("blend_in_duration_s", "blend_out_duration_s"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0.0:
+            parser.error(f"--{name} must be a finite non-negative duration for --ground_jump")
+    if not math.isfinite(args.stand_hold_duration_s) or args.stand_hold_duration_s <= 0.0:
+        parser.error("--stand_hold_duration_s must be a positive finite duration for --ground_jump")
     try:
         args.ground_goal_pos_x_range = _manifest_ground_goal_range(args.manifest.resolve())
     except ValueError as exc:
@@ -2431,6 +2451,24 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         "--interactive_goals",
         action="store_true",
         help="Read each additional ground-jump longitudinal goal from stdin without blocking control.",
+    )
+    parser.add_argument(
+        "--blend_in_duration_s",
+        type=float,
+        default=_GROUND_BLEND_IN_DURATION_S,
+        help="Frozen phase-zero policy blend-in for every ground-jump goal [s].",
+    )
+    parser.add_argument(
+        "--blend_out_duration_s",
+        type=float,
+        default=_GROUND_BLEND_OUT_DURATION_S,
+        help="Final-policy-row to validated-stand blend-out after every ground jump [s].",
+    )
+    parser.add_argument(
+        "--stand_hold_duration_s",
+        type=float,
+        default=_GROUND_STAND_HOLD_DURATION_S,
+        help="Minimum quiet STAND time after blend-out before accepting the next goal [s].",
     )
     parser.add_argument("--goal_pos_x", type=float, default=0.0, help="Read-only policy goal x displacement [m].")
     parser.add_argument("--goal_pos_y", type=float, default=0.0, help="Read-only policy goal y displacement [m].")
@@ -3057,6 +3095,11 @@ def _lock_ground_session_after_abort(
     return True
 
 
+def _ground_stand_hold_complete(now: float, stand_entered_at: float | None, duration_s: float) -> bool:
+    """Return whether the first goal or post-jump STAND hold may proceed."""
+    return stand_entered_at is None or now - stand_entered_at >= duration_s
+
+
 def _run_control(  # noqa: C901
     robot: _G1Robot,
     operator: _StandOperator,
@@ -3078,6 +3121,7 @@ def _run_control(  # noqa: C901
     interactive_goal_reader: _InteractiveGoalReader | None = None,
     ground_goal_pos_x_range: tuple[float, float] | None = None,
     ground_recorder: _GroundJumpRecorder | None = None,
+    ground_stand_hold_duration_s: float = 0.0,
     rehearsal_escalated: bool = False,
     rehearsal_unlimited_slew: bool = False,
 ) -> tuple[bool, str]:
@@ -3089,6 +3133,8 @@ def _run_control(  # noqa: C901
         raise ValueError("gantry_policy_rehearsal and ground_jump are mutually exclusive")
     if ground_jump and ground_goal_pos_x_range is None:
         raise ValueError("ground_jump requires a manifest goal range")
+    if not math.isfinite(ground_stand_hold_duration_s) or ground_stand_hold_duration_s < 0.0:
+        raise ValueError("ground_stand_hold_duration_s must be a finite non-negative duration")
     audit_recorder = ground_recorder if ground_jump else rehearsal_recorder
     snapshot = state_buffer.snapshot()
     if snapshot is None:
@@ -3161,6 +3207,7 @@ def _run_control(  # noqa: C901
         ground_goal_ready = False
         ground_jump_started = False
         completed_ground_jumps = 0
+        ground_stand_entered_at: float | None = None
         ground_stop_requested = False
         ground_stop_reason = ""
         ground_session_locked = False
@@ -3251,14 +3298,17 @@ def _run_control(  # noqa: C901
                 and not ground_goal_ready
                 and not ground_stop_requested
                 and not ground_session_locked
+                and _ground_stand_hold_complete(now, ground_stand_entered_at, ground_stand_hold_duration_s)
                 and now - control_started_at < duration_s
             ):
                 goal: JumpGoal | None = None
                 if remaining_ground_goals:
                     goal = remaining_ground_goals.pop(0)
+                    if completed_ground_jumps > 0:
+                        print(f"READY: next goal dx (or q) -> configured dx={goal.dx:+.2f}")
                 elif interactive_goal_reader is not None:
                     if not interactive_goal_reader.pending:
-                        interactive_goal_reader.request()
+                        interactive_goal_reader.request("READY: next goal dx (or q) ->")
                     response = interactive_goal_reader.poll()
                     if interactive_goal_reader.eof:
                         stdin_available = False
@@ -3283,7 +3333,7 @@ def _run_control(  # noqa: C901
                 if goal is not None:
                     operator.set_goal(goal)
                     ground_goal_ready = True
-                    print(f"READY: tap A to arm goal dx={goal.dx:+.2f}")
+                    print(f"READY: tap A to arm goal dx={goal.dx:+.2f}; wait for ARMED, then tap Y.")
             if gantry_policy_rehearsal:
                 if not rehearsal_ready and now - control_started_at >= _REHEARSAL_STABILIZATION_S:
                     rehearsal_ready = True
@@ -3379,6 +3429,7 @@ def _run_control(  # noqa: C901
                     if ground_jump_started and fsm.state is JumpControllerState.STAND:
                         completed_ground_jumps += 1
                         ground_jump_started = False
+                        ground_stand_entered_at = now
             balance_offset = fsm.update_balance(_FAST_DT)
             feedback_limits = _active_feedback_limits(
                 robot._manifest,
@@ -3558,6 +3609,10 @@ def main() -> int:  # noqa: C901
         rehearsal_policy.warm_up()
     elif args.ground_jump:
         _verify_shadow_admission(args.shadow_admission.resolve(), manifest_path, policy_path, manifest)
+        ground_settle_timeout_s = max(
+            _GROUND_SETTLE_TIMEOUT_S,
+            args.blend_out_duration_s + _GROUND_SETTLE_TIMEOUT_MARGIN_S,
+        )
         ground_recorder = _GroundJumpRecorder(
             args.ground_log.resolve(),
             manifest_path,
@@ -3569,8 +3624,11 @@ def main() -> int:  # noqa: C901
             ground_balance_config,
             _GROUND_STAND_ENTRY_DURATION_S,
             True,
+            args.blend_in_duration_s,
             _GROUND_SETTLE_DURATION_S,
-            _GROUND_SETTLE_TIMEOUT_S,
+            args.blend_out_duration_s,
+            args.stand_hold_duration_s,
+            ground_settle_timeout_s,
             _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S,
             _GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD,
         )
@@ -3835,9 +3893,12 @@ def main() -> int:  # noqa: C901
                 f"initial roll={balance_config.initial_roll_integral:.1f} rad s, "
                 f"pitch={balance_config.initial_pitch_integral:.1f} rad s; "
                 f"stand entry/attitude-target transition={stand_entry_duration_s:.1f} s; "
-                "policy-native landing stand enabled, "
-                f"settle={_GROUND_SETTLE_DURATION_S:.1f} s "
-                f"(timeout={_GROUND_SETTLE_TIMEOUT_S:.1f} s, max joint speed="
+                "RoboJuDo session flow enabled: blend in -> JUMP -> blend out -> STAND; "
+                f"blend-in={args.blend_in_duration_s:.1f} s, "
+                f"preparation balance={'retained' if args.blend_in_duration_s > 0.0 else 'not applicable'}, "
+                f"blend-out={args.blend_out_duration_s:.1f} s, "
+                f"stand hold={args.stand_hold_duration_s:.1f} s; "
+                f"settle timeout={ground_settle_timeout_s:.1f} s (max joint speed="
                 f"{_GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S:.2f} rad/s), joint-limit abort margin="
                 f"{_GROUND_JOINT_LIMIT_ABORT_MARGIN_RAD:.3f} rad."
             )
@@ -3898,11 +3959,20 @@ def main() -> int:  # noqa: C901
                 ),
                 latched_abort_upright_settle=args.ground_jump,
                 policy_stand_after_jump=args.ground_jump,
+                policy_prepare_duration_s=(args.blend_in_duration_s if args.ground_jump else 0.0),
+                policy_prepare_retain_balance=args.ground_jump and args.blend_in_duration_s > 0.0,
+                policy_stand_retrigger_prepare_duration_s=(args.blend_in_duration_s if args.ground_jump else 0.0),
+                jump_blend_out_duration_s=(args.blend_out_duration_s if args.ground_jump else 0.0),
+                goto_start_timeout_s=(
+                    JumpControllerConfig().goto_start_duration_s + args.blend_in_duration_s + 2.0
+                    if args.ground_jump
+                    else JumpControllerConfig().goto_start_timeout_s
+                ),
                 settle_duration_s=(
                     _GROUND_SETTLE_DURATION_S if args.ground_jump else JumpControllerConfig().settle_duration_s
                 ),
                 settle_timeout_s=(
-                    _GROUND_SETTLE_TIMEOUT_S if args.ground_jump else JumpControllerConfig().settle_timeout_s
+                    ground_settle_timeout_s if args.ground_jump else JumpControllerConfig().settle_timeout_s
                 ),
                 settle_joint_velocity_tolerance_rad_s=(
                     _GROUND_SETTLE_JOINT_VELOCITY_TOLERANCE_RAD_S
@@ -3935,6 +4005,7 @@ def main() -> int:  # noqa: C901
             interactive_goal_reader=(_InteractiveGoalReader() if args.interactive_goals else None),
             ground_goal_pos_x_range=args.ground_goal_pos_x_range,
             ground_recorder=ground_recorder,
+            ground_stand_hold_duration_s=(args.stand_hold_duration_s if args.ground_jump else 0.0),
             rehearsal_escalated=args.rehearsal_escalated,
             rehearsal_unlimited_slew=args.rehearsal_unlimited_slew,
         )

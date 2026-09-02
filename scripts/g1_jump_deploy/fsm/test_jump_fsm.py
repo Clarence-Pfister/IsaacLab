@@ -375,6 +375,72 @@ def test_policy_native_stand_continues_final_reference_after_jump(
     np.testing.assert_array_equal(offsets, 0.0)
 
 
+def test_jump_blend_out_returns_final_policy_row_to_stand(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    operator = _FakeOperator()
+    policy = _GoalConditionedPolicy()
+    config = replace(
+        controller_config,
+        policy_stand_after_jump=True,
+        jump_blend_out_duration_s=0.1,
+    )
+    fsm = JumpControllerFSM(manifest_path, robot, operator, policy, config=config)
+    _prepare_armed(fsm, operator)
+    _confirm(fsm, operator)
+    _advance_to(fsm, JumpControllerState.SETTLE)
+    observation_count = len(policy.observations)
+    settle_command_index = len(robot.commands)
+
+    _advance_to(fsm, JumpControllerState.STAND)
+
+    settle_commands = robot.commands[settle_command_index:]
+    assert len(policy.observations) == observation_count
+    assert len(settle_commands) == math.ceil(config.jump_blend_out_duration_s / fsm.policy_dt)
+    np.testing.assert_allclose(settle_commands[-1].target, default_position)
+    np.testing.assert_allclose(settle_commands[-1].stiffness, fsm.stand_stiffness)
+    np.testing.assert_allclose(settle_commands[-1].damping, fsm.stand_damping)
+    assert not fsm.policy_stand_active
+    assert fsm.last_report == "Jump blend-out reached measured stand."
+
+
+@pytest.mark.parametrize("duration", (-1.0, math.nan, math.inf))
+def test_jump_blend_out_duration_must_be_finite_and_non_negative(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+    duration: float,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+
+    with pytest.raises(ValueError, match="jump_blend_out_duration_s"):
+        JumpControllerFSM(
+            manifest_path,
+            _FakeRobot(default_position),
+            _FakeOperator(),
+            _ZeroPolicy(),
+            config=replace(controller_config, jump_blend_out_duration_s=duration),
+        )
+
+
+def test_settle_timeout_must_cover_jump_blend_out(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+
+    with pytest.raises(ValueError, match="blend-out duration"):
+        JumpControllerFSM(
+            manifest_path,
+            _FakeRobot(default_position),
+            _FakeOperator(),
+            _ZeroPolicy(),
+            config=replace(controller_config, jump_blend_out_duration_s=0.3, settle_timeout_s=0.2),
+        )
+
+
 def test_margin_enabled_policy_stand_waits_when_velocity_projects_across_limit(
     bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
     controller_config: JumpControllerConfig,
@@ -591,6 +657,56 @@ def test_goal_conditioned_policy_preparation_preserves_command_and_clock(
     np.testing.assert_array_equal(policy.observations[-1][320:326], (1.0, 0.0, 0.0, 0.0, 0.0, 0.0))
     assert fsm.episode_step == 1
     assert fsm.phase_clock_history == [0]
+
+
+@pytest.mark.parametrize("retain_balance", (False, True))
+def test_policy_preparation_balance_retention_branches(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+    retain_balance: bool,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+    robot = _FakeRobot(default_position)
+    operator = _FakeOperator()
+    policy = _GoalConditionedPolicy()
+    config = replace(
+        controller_config,
+        policy_prepare_duration_s=0.06,
+        policy_prepare_retain_balance=retain_balance,
+        goto_start_timeout_s=0.24,
+    )
+    fsm = JumpControllerFSM(manifest_path, robot, operator, policy, config=config)
+    fsm.enable()
+    _control_step(fsm)
+    _pulse_start(fsm, operator)
+    while not policy.observations:
+        _control_step(fsm)
+
+    if retain_balance:
+        assert fsm.balance_gate == pytest.approx(1.0)
+    else:
+        assert 0.0 < fsm.balance_gate < 1.0
+
+    _advance_to(fsm, JumpControllerState.ARMED)
+    assert fsm.balance_gate == pytest.approx(1.0 if retain_balance else 0.0)
+    _confirm(fsm, operator)
+    assert fsm.balance_gate == 0.0
+
+
+def test_policy_prepare_retain_balance_must_be_boolean(
+    bundle: tuple[Path, np.ndarray, np.ndarray, np.ndarray],
+    controller_config: JumpControllerConfig,
+) -> None:
+    manifest_path, default_position, _, _ = bundle
+
+    with pytest.raises(ValueError, match="policy_prepare_retain_balance"):
+        JumpControllerFSM(
+            manifest_path,
+            _FakeRobot(default_position),
+            _FakeOperator(),
+            _ZeroPolicy(),
+            config=replace(controller_config, policy_prepare_retain_balance=1),  # type: ignore[arg-type]
+        )
 
 
 def test_goal_conditioned_preparation_supports_two_distinct_jump_cycles(

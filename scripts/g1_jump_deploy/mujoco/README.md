@@ -109,8 +109,10 @@ settlement before reporting `PASS`:
 ./isaaclab.sh -p scripts/g1_jump_deploy/fsm/run_fsm_mujoco.py \
   --manifest logs/g1_jump_deploy_bundle_validated/deploy_manifest.json \
   --scenario nominal --unmeasured_ground_validation \
+  --blend_in_duration_s 0.0 --blend_out_duration_s 5.0 \
+  --stand_hold_duration_s 1.0 \
   --goal_pos_x 0.0 --goal_pos_y 0.0 --goal_roll 0.0 \
-  --goal_pitch 0.0 --goal_yaw 0.0 --max_duration 10 \
+  --goal_pitch 0.0 --goal_yaw 0.0 --max_duration 15 \
   --headless --log /tmp/g1_unmeasured_ground_zero.npz
 ```
 

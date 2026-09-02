@@ -209,13 +209,18 @@ python scripts/g1_jump_deploy/hardware/run_fsm_g1.py \
   NETWORK_INTERFACE --ground_jump --enable_control \
   --entry_mode native_stand --exit_mode native_walkrun --duration 30 \
   --effort_scale 0.3 --goal_sequence "0.0" --interactive_goals \
+  --blend_in_duration_s 0.0 --blend_out_duration_s 5.0 \
+  --stand_hold_duration_s 1.0 \
   --shadow_admission logs/hardware_shadow/upright_20260827_v2_admission.json \
   --ground_log logs/hardware_ground/zero_FIRST_RUN.npz \
   --acknowledge_unmeasured_ground_jump
 ```
 
-The sequence is consumed first. On each return to `STAND`, interactive mode
-prints `NEXT GOAL dx [m] (or q):` and reads stdin on a background thread, so
+The sequence is consumed first. A positive blend-in uses frozen-phase policy
+preparation while retaining independent balance; zero arms directly. The
+completed policy blends back to the validated stand before the quiet stand hold.
+After that hold, interactive mode prints `READY: next goal dx (or q) ->` and
+reads stdin on a background thread, so
 the 500 Hz command loop never waits for the terminal. Stdin EOF only disables
 interactive prompts: it is never interpreted as `q` or as an abort, and queued
 `--goal_sequence` entries remain available. Only an explicit `q` line or B ends

@@ -50,8 +50,9 @@ _CONFIRM_TIME_S = 2.7
 _EARLY_ABORT_TIME_S = 2.9
 _CONTACTLESS_REHEARSAL_ARMED_TIMEOUT_S = 15.0
 _CONTACTLESS_REHEARSAL_TARGET_RATE_LIMIT_RAD_S = 1.2
-_UNMEASURED_GROUND_CONFIRM_TIME_S = 2.8
-_UNMEASURED_GROUND_POLICY_PREPARE_DURATION_S = 0.0
+_UNMEASURED_GROUND_BLEND_IN_DURATION_S = 0.0
+_UNMEASURED_GROUND_BLEND_OUT_DURATION_S = 5.0
+_UNMEASURED_GROUND_STAND_HOLD_DURATION_S = 1.0
 _UNMEASURED_GROUND_STAND_STIFFNESS = 200.0
 _UNMEASURED_GROUND_STAND_DAMPING = 5.0
 _REPEAT_STAND_DWELL_S = 0.5
@@ -360,6 +361,9 @@ def _scenario_timeline(
     episode_steps: int | None = None,
     settle_timeout_s: float = JumpControllerConfig().settle_timeout_s,
     repeat_prepare_duration_s: float = 0.0,
+    blend_out_duration_s: float | None = None,
+    stand_hold_duration_s: float = _REPEAT_STAND_DWELL_S,
+    repeat_arm_duration_s: float | None = None,
 ) -> tuple[OperatorTimelineEntry, ...]:
     if scenario == "stand":
         return ()
@@ -381,9 +385,12 @@ def _scenario_timeline(
             raise ValueError("The repeat scenario requires at least two goals.")
         if episode_steps is None or episode_steps <= 0:
             raise ValueError("The repeat scenario requires a positive episode step count.")
-        cycle_period_s = (
-            confirm_time_s - start_time_s + episode_steps * policy_dt + settle_timeout_s + _REPEAT_STAND_DWELL_S
+        settle_and_hold_s = (
+            settle_timeout_s + _REPEAT_STAND_DWELL_S
+            if blend_out_duration_s is None
+            else blend_out_duration_s + stand_hold_duration_s
         )
+        cycle_period_s = confirm_time_s - start_time_s + episode_steps * policy_dt + settle_and_hold_s
         entries = []
         for index, repeat_goal in enumerate(repeat_goals):
             cycle_offset_s = index * cycle_period_s
@@ -391,6 +398,8 @@ def _scenario_timeline(
             repeat_confirm_time_s = confirm_time_s + cycle_offset_s
             if index > 0 and repeat_prepare_duration_s > 0.0:
                 repeat_confirm_time_s = repeat_start_time_s + repeat_prepare_duration_s + _REPEAT_CONFIRM_DWELL_S
+            if index > 0 and repeat_arm_duration_s is not None:
+                repeat_confirm_time_s = repeat_start_time_s + repeat_arm_duration_s + _REPEAT_CONFIRM_DWELL_S
             entries.extend(
                 (
                     OperatorTimelineEntry(
@@ -1006,6 +1015,29 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         help=("Goal-conditioned policy warm-up duration at frozen phase zero [s]. Defaults to 0 s."),
     )
     parser.add_argument(
+        "--blend_in_duration_s",
+        type=float,
+        default=_UNMEASURED_GROUND_BLEND_IN_DURATION_S,
+        help="Frozen phase-zero blend-in used for every unmeasured-ground goal [s].",
+    )
+    parser.add_argument(
+        "--policy_prepare_retain_balance",
+        action="store_true",
+        help="Retain independent balance throughout frozen phase-zero policy preparation.",
+    )
+    parser.add_argument(
+        "--blend_out_duration_s",
+        type=float,
+        default=_UNMEASURED_GROUND_BLEND_OUT_DURATION_S,
+        help="Final-policy-row to stand blend-out after every unmeasured-ground jump [s].",
+    )
+    parser.add_argument(
+        "--stand_hold_duration_s",
+        type=float,
+        default=_UNMEASURED_GROUND_STAND_HOLD_DURATION_S,
+        help="Minimum quiet STAND time before the next repeat goal is armed [s].",
+    )
+    parser.add_argument(
         "--policy_prepare_pose_tolerance_rad",
         type=float,
         default=JumpControllerConfig().policy_prepare_pose_tolerance_rad,
@@ -1019,7 +1051,7 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     parser.add_argument(
         "--policy_stand_retrigger_prepare_duration_s",
         type=float,
-        default=JumpControllerConfig().policy_stand_retrigger_prepare_duration_s,
+        default=None,
         help="Frozen phase-zero preparation from policy-native stand to each subsequent goal [s].",
     )
     parser.add_argument(
@@ -1130,7 +1162,7 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     parser.add_argument(
         "--settle_timeout_s",
         type=float,
-        default=JumpControllerConfig().settle_timeout_s,
+        default=None,
         help="Maximum measured stand-convergence interval after a jump [s].",
     )
     parser.add_argument(
@@ -1177,12 +1209,22 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
     if not math.isfinite(args.joint_limit_abort_margin_rad) or args.joint_limit_abort_margin_rad < 0.0:
         parser.error("--joint_limit_abort_margin_rad must be a finite non-negative angle.")
     if args.policy_prepare_duration_s is None:
-        args.policy_prepare_duration_s = (
-            _UNMEASURED_GROUND_POLICY_PREPARE_DURATION_S if args.unmeasured_ground_validation else 0.0
+        args.policy_prepare_duration_s = args.blend_in_duration_s if args.unmeasured_ground_validation else 0.0
+    if args.policy_stand_retrigger_prepare_duration_s is None:
+        args.policy_stand_retrigger_prepare_duration_s = (
+            args.blend_in_duration_s if args.unmeasured_ground_validation and args.scenario == "repeat" else 0.0
+        )
+    if args.settle_timeout_s is None:
+        args.settle_timeout_s = (
+            max(JumpControllerConfig().settle_timeout_s, args.blend_out_duration_s + 2.0)
+            if args.unmeasured_ground_validation
+            else JumpControllerConfig().settle_timeout_s
         )
     if args.confirm_time_s is None:
         args.confirm_time_s = (
-            _UNMEASURED_GROUND_CONFIRM_TIME_S if args.unmeasured_ground_validation else _CONFIRM_TIME_S
+            args.start_time_s + args.goto_start_duration_s + args.policy_prepare_duration_s + 0.3
+            if args.unmeasured_ground_validation
+            else _CONFIRM_TIME_S
         )
     if not math.isfinite(args.max_duration) or args.max_duration <= 0.0:
         parser.error("--max_duration must be a positive finite duration.")
@@ -1196,12 +1238,22 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         parser.error("--goto_start_duration_s must be a positive finite duration.")
     if not math.isfinite(args.policy_prepare_duration_s) or args.policy_prepare_duration_s < 0.0:
         parser.error("--policy_prepare_duration_s must be a finite non-negative duration.")
+    for name in ("blend_in_duration_s", "blend_out_duration_s"):
+        value = getattr(args, name)
+        if not math.isfinite(value) or value < 0.0:
+            parser.error(f"--{name} must be a finite non-negative duration.")
+    if not math.isfinite(args.stand_hold_duration_s) or args.stand_hold_duration_s <= 0.0:
+        parser.error("--stand_hold_duration_s must be a positive finite duration.")
     if (
         not math.isfinite(args.policy_stand_retrigger_prepare_duration_s)
         or args.policy_stand_retrigger_prepare_duration_s < 0.0
     ):
         parser.error("--policy_stand_retrigger_prepare_duration_s must be a finite non-negative duration.")
-    if args.policy_stand_retrigger_prepare_duration_s > 0.0 and not args.policy_stand_after_jump:
+    if (
+        args.policy_stand_retrigger_prepare_duration_s > 0.0
+        and not args.policy_stand_after_jump
+        and not args.unmeasured_ground_validation
+    ):
         parser.error("--policy_stand_retrigger_prepare_duration_s requires --policy_stand_after_jump.")
     if args.policy_stand_direct_retrigger and not args.policy_stand_after_jump:
         parser.error("--policy_stand_direct_retrigger requires --policy_stand_after_jump.")
@@ -1227,8 +1279,12 @@ def _parse_args() -> argparse.Namespace:  # noqa: C901
         parser.error("--stand_entry_duration_s must be a positive finite duration.")
     if not math.isfinite(args.settle_duration_s) or args.settle_duration_s <= 0.0:
         parser.error("--settle_duration_s must be a positive finite duration.")
-    if not math.isfinite(args.settle_timeout_s) or args.settle_timeout_s < args.settle_duration_s:
-        parser.error("--settle_timeout_s must be finite and not shorter than --settle_duration_s.")
+    required_settle_duration_s = max(
+        args.settle_duration_s,
+        args.blend_out_duration_s if args.unmeasured_ground_validation else 0.0,
+    )
+    if not math.isfinite(args.settle_timeout_s) or args.settle_timeout_s < required_settle_duration_s:
+        parser.error("--settle_timeout_s must cover the configured settle and blend-out durations.")
     if not math.isfinite(args.stand_return_start_s) or args.stand_return_start_s < 0.0:
         parser.error("--stand_return_start_s must be a finite non-negative time.")
     if not math.isfinite(args.stand_return_duration_s) or args.stand_return_duration_s <= 0.0:
@@ -1391,11 +1447,13 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         goto_start_duration_s=args.goto_start_duration_s,
         goto_start_timeout_s=goto_start_timeout_s,
         policy_prepare_duration_s=args.policy_prepare_duration_s,
+        policy_prepare_retain_balance=args.policy_prepare_retain_balance,
         policy_prepare_pose_tolerance_rad=args.policy_prepare_pose_tolerance_rad,
         policy_stand_after_jump=args.policy_stand_after_jump,
         policy_stand_retrigger_prepare_duration_s=args.policy_stand_retrigger_prepare_duration_s,
         policy_stand_direct_retrigger=args.policy_stand_direct_retrigger,
         policy_terminal_return_steps=args.policy_terminal_return_steps,
+        jump_blend_out_duration_s=(args.blend_out_duration_s if args.unmeasured_ground_validation else 0.0),
         jump_target_blend_steps=args.jump_target_blend_steps,
         jump_gain_blend_steps=args.jump_gain_blend_steps,
         jump_balance_blend_steps=args.jump_balance_blend_steps,
@@ -1436,6 +1494,11 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         episode_steps=robot.episode_steps,
         settle_timeout_s=args.settle_timeout_s,
         repeat_prepare_duration_s=args.policy_stand_retrigger_prepare_duration_s,
+        blend_out_duration_s=(args.blend_out_duration_s if args.unmeasured_ground_validation else None),
+        stand_hold_duration_s=args.stand_hold_duration_s,
+        repeat_arm_duration_s=(
+            args.goto_start_duration_s + args.blend_in_duration_s if args.unmeasured_ground_validation else None
+        ),
     )
     operator = ScriptedOperator(operator_timeline)
     fsm = JumpControllerFSM(
@@ -1500,11 +1563,15 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         "confirm_time_s": args.confirm_time_s,
         "goto_start_duration_s": args.goto_start_duration_s,
         "policy_prepare_duration_s": args.policy_prepare_duration_s,
+        "policy_prepare_retain_balance": args.policy_prepare_retain_balance,
         "policy_prepare_pose_tolerance_rad": args.policy_prepare_pose_tolerance_rad,
         "policy_stand_after_jump": args.policy_stand_after_jump,
         "policy_stand_retrigger_prepare_duration_s": args.policy_stand_retrigger_prepare_duration_s,
         "policy_stand_direct_retrigger": args.policy_stand_direct_retrigger,
         "policy_terminal_return_steps": args.policy_terminal_return_steps,
+        "blend_in_duration_s": args.blend_in_duration_s,
+        "blend_out_duration_s": args.blend_out_duration_s,
+        "stand_hold_duration_s": args.stand_hold_duration_s,
         "jump_target_blend_steps": args.jump_target_blend_steps,
         "jump_gain_blend_steps": args.jump_gain_blend_steps,
         "jump_balance_blend_steps": args.jump_balance_blend_steps,
@@ -1571,6 +1638,12 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         print("Contactless rehearsal: ground collision disabled; measured foot contact is unavailable.")
     if args.unmeasured_ground_validation:
         print("Unmeasured-ground validation: ground collision is enabled; FSM foot contact is unavailable.")
+        print(
+            "RoboJuDo session flow: "
+            f"blend in {args.blend_in_duration_s:.3f} s -> JUMP -> "
+            f"blend out {args.blend_out_duration_s:.3f} s -> "
+            f"STAND hold {args.stand_hold_duration_s:.3f} s -> next goal"
+        )
         if args.latched_abort_upright_settle:
             print("Joint-limit-only latched post-takeoff aborts settle when the completed episode remains upright.")
         if args.joint_limit_abort_margin_rad > 0.0:
@@ -1582,6 +1655,7 @@ def run(args: argparse.Namespace) -> None:  # noqa: C901
         print(
             "Goal-conditioned preparation: "
             f"phase zero frozen for {args.policy_prepare_duration_s:.3f} s, "
+            f"balance={'retained' if args.policy_prepare_retain_balance else 'faded'}, "
             f"tracking tolerance={args.policy_prepare_pose_tolerance_rad:.3f} rad"
         )
     if args.policy_stand_retrigger_prepare_duration_s > 0.0:

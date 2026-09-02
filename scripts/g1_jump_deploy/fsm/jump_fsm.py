@@ -105,6 +105,8 @@ class JumpControllerConfig:
         policy_prepare_duration_s: Duration of the goal-conditioned policy
             warm-up at frozen reference phase zero [s]. Zero preserves the
             direct stand-to-armed behavior.
+        policy_prepare_retain_balance: Whether to retain the preparation-start
+            independent balance correction until the transition to JUMP.
         policy_prepare_pose_tolerance_rad: Maximum measured tracking error
             from the prepared policy target when arming [rad].
         policy_stand_after_jump: Whether to keep evaluating the final STAND
@@ -127,6 +129,10 @@ class JumpControllerConfig:
         policy_terminal_return_steps: Number of final policy steps over which
             to blend the policy target and gains to the validated stand target
             while restoring independent balance. Zero disables the return.
+        jump_blend_out_duration_s: Duration of the post-episode quintic blend
+            from the policy's final reference and jump gains to the validated
+            stand target and gains [s]. Zero preserves the configured SETTLE
+            behavior.
         jump_target_blend_steps: Number of initial policy steps used to blend
             the held stand target into the policy target. ``None`` uses the
             complete manifest IDLE interval; zero disables target blending.
@@ -199,6 +205,7 @@ class JumpControllerConfig:
     goto_start_load_compensation_scale: float = 1.0
     goto_start_load_compensation_limit_rad: float = 0.1
     policy_prepare_duration_s: float = 0.0
+    policy_prepare_retain_balance: bool = False
     policy_prepare_pose_tolerance_rad: float = 0.1
     policy_stand_after_jump: bool = False
     policy_stand_pose_tolerance_rad: float = 0.2
@@ -206,6 +213,7 @@ class JumpControllerConfig:
     policy_stand_retrigger_prepare_duration_s: float = 0.0
     policy_stand_direct_retrigger: bool = False
     policy_terminal_return_steps: int = 0
+    jump_blend_out_duration_s: float = 0.0
     jump_target_blend_steps: int | None = None
     jump_gain_blend_steps: int | None = None
     jump_balance_blend_steps: int | None = None
@@ -578,6 +586,8 @@ def _validate_controller_config(config: JumpControllerConfig) -> None:
         or float(config.policy_prepare_duration_s) < 0.0
     ):
         raise ValueError("policy_prepare_duration_s must be a finite non-negative duration.")
+    if not isinstance(config.policy_prepare_retain_balance, bool):
+        raise ValueError("policy_prepare_retain_balance must be a boolean.")
     if (
         isinstance(config.policy_stand_retrigger_prepare_duration_s, bool)
         or not isinstance(config.policy_stand_retrigger_prepare_duration_s, (int, float))
@@ -603,6 +613,13 @@ def _validate_controller_config(config: JumpControllerConfig) -> None:
         or config.policy_terminal_return_steps < 0
     ):
         raise ValueError("policy_terminal_return_steps must be a non-negative integer.")
+    if (
+        isinstance(config.jump_blend_out_duration_s, bool)
+        or not isinstance(config.jump_blend_out_duration_s, (int, float))
+        or not math.isfinite(float(config.jump_blend_out_duration_s))
+        or float(config.jump_blend_out_duration_s) < 0.0
+    ):
+        raise ValueError("jump_blend_out_duration_s must be a finite non-negative duration.")
     if config.policy_terminal_return_steps > 0 and config.policy_stand_after_jump:
         raise ValueError("policy_terminal_return_steps cannot be combined with policy_stand_after_jump.")
     for field_name in (
@@ -623,8 +640,9 @@ def _validate_controller_config(config: JumpControllerConfig) -> None:
     )
     if config.goto_start_timeout_s < required_goto_duration_s:
         raise ValueError("goto_start_timeout_s must cover goto_start_duration_s plus policy_prepare_duration_s.")
-    if config.settle_timeout_s < config.settle_duration_s:
-        raise ValueError("settle_timeout_s must not be shorter than settle_duration_s.")
+    required_settle_duration_s = max(config.settle_duration_s, config.jump_blend_out_duration_s)
+    if config.settle_timeout_s < required_settle_duration_s:
+        raise ValueError("settle_timeout_s must not be shorter than the configured settle or blend-out duration.")
 
 
 def _quintic(progress: float) -> float:
@@ -852,6 +870,8 @@ class JumpControllerFSM:
         if self.state is JumpControllerState.GOTO_START:
             return self._goto_balance_gate
         if self.state is JumpControllerState.ARMED:
+            if self._policy_prepared and self._config.policy_prepare_retain_balance:
+                return self._goto_balance_gate
             return 0.0 if self._policy_prepared or self._policy_stand_retrigger else 1.0
         if self.state is JumpControllerState.JUMP:
             return self._jump_balance_gate
@@ -1227,7 +1247,10 @@ class JumpControllerFSM:
             self._jump_stiffness - self._policy_prepare_start_stiffness
         )
         damping = self._policy_prepare_start_damping + blend * (self._jump_damping - self._policy_prepare_start_damping)
-        self._goto_balance_gate = self._policy_prepare_start_balance_gate * (1.0 - blend)
+        if self._config.policy_prepare_retain_balance:
+            self._goto_balance_gate = self._policy_prepare_start_balance_gate
+        else:
+            self._goto_balance_gate = self._policy_prepare_start_balance_gate * (1.0 - blend)
         self._command(target, stiffness, damping, slew=False)
 
         if progress < 1.0:
@@ -1595,6 +1618,9 @@ class JumpControllerFSM:
         return self._runtime.transform_action(raw_action)
 
     def _step_settle(self) -> None:
+        if self._config.jump_blend_out_duration_s > 0.0:
+            self._step_jump_blend_out()
+            return
         if self._config.policy_stand_after_jump:
             self._step_policy_stand_settle()
             return
@@ -1620,6 +1646,35 @@ class JumpControllerFSM:
                 self._transition(JumpControllerState.DAMPING)
             else:
                 self.last_report = "Waiting for measured stand convergence: " + "; ".join(convergence_failures)
+
+    def _step_jump_blend_out(self) -> None:
+        """Blend the held final policy row and jump gains into STAND."""
+        duration_s = self._config.jump_blend_out_duration_s
+        progress = min((self._state_elapsed_s + self.policy_dt) / duration_s, 1.0)
+        blend = _quintic(progress)
+        target = self._settle_start_position + blend * (self._manifest.default_position - self._settle_start_position)
+        stiffness = self._jump_stiffness + blend * (self._stand_stiffness - self._jump_stiffness)
+        damping = self._jump_damping + blend * (self._stand_damping - self._jump_damping)
+        self._settle_balance_gate = blend
+        self._command(target, stiffness, damping, slew=False)
+        gains_ready = np.allclose(self._last_stiffness, self._stand_stiffness, rtol=0.0, atol=1.0e-12) and np.allclose(
+            self._last_damping, self._stand_damping, rtol=0.0, atol=1.0e-12
+        )
+        if progress >= 1.0 and gains_ready:
+            convergence_failures = self._settle_convergence_failures()
+            if not convergence_failures:
+                self.latched_goal = None
+                self._policy_stand_active = False
+                self.last_report = "Jump blend-out reached measured stand."
+                self._transition(JumpControllerState.STAND)
+            elif self._state_elapsed_s + self.policy_dt >= self._config.settle_timeout_s:
+                self.latched_goal = None
+                self.last_report = "Jump blend-out timed out: " + "; ".join(convergence_failures) + "; damping enabled."
+                self._transition(JumpControllerState.DAMPING)
+            else:
+                self.last_report = "Waiting for measured stand convergence after blend-out: " + "; ".join(
+                    convergence_failures
+                )
 
     def _step_policy_stand_settle(self) -> None:
         """Continue closed-loop inference on the policy's final STAND row."""
