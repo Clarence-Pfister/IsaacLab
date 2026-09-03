@@ -12,6 +12,22 @@
 > distribution. `main` tracks upstream `release/3.0.0-beta2`; the project-specific Unitree G1 tasks, assets,
 > rewards, and container fixes live on topic branches that are combined on `integration/all`.
 
+> [!WARNING]
+> **This repository contains code that commands a physical robot.**
+> [`scripts/g1_jump_deploy/hardware/`](scripts/g1_jump_deploy/hardware) publishes joint targets to a
+> real Unitree G1 over `unitree_sdk2`, and its `--ground_jump` mode commands a jump on a real floor.
+> A humanoid executing a jump can injure people and destroy itself. This is unsupported research
+> code, not a validated product.
+>
+> Before running any hardware path, read
+> [`scripts/g1_jump_deploy/hardware/README.md`](scripts/g1_jump_deploy/hardware/README.md) in full.
+> It defines the required preflight order and the physical preconditions for each stage. Note that
+> the validated deployment bundle, shadow-admission files, and audit logs those commands require
+> live under `logs/`, which is **not** distributed with this repository — the hashes recorded there
+> identify artifacts you must export and validate yourself.
+>
+> Your robot, your test area, and your safety case are your own responsibility.
+
 This repository trains a 23-DoF Unitree G1 to reproduce a reference jump with RSL-RL.
 
 ## What this fork adds
@@ -452,6 +468,10 @@ jump smoke test before starting a full training job.
 Isaac Lab is released under the [BSD 3-Clause License](LICENSE). The `isaaclab_mimic` extension and its standalone
 scripts are released under the [Apache License 2.0](LICENSE-mimic). Dependency and asset licenses are collected under
 [`docs/licenses/`](docs/licenses).
+
+The G1 meshes, MJCF, and generated USD under [`data_storage/`](data_storage) are derived from the Unitree G1 robot
+description and remain under Unitree Robotics' BSD 3-Clause terms. See
+[`data_storage/NOTICE.md`](data_storage/NOTICE.md) for the attribution and provenance of everything in that directory.
 
 This fork retains the upstream Isaac Lab copyright notices, contributor history, and
 [`CITATION.cff`](CITATION.cff). If you use Isaac Lab in published research, cite the upstream project as described in
