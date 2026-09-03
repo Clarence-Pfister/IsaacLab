@@ -8,6 +8,16 @@ SPDX-License-Identifier: BSD-3-Clause
 
 # G1 jump hardware preflight
 
+> [!WARNING]
+> `run_fsm_g1.py --enable_control` actuates a real robot, and `--ground_jump` commands a jump on a
+> real floor. Work through this document in order and do not skip a stage: a passing stage is
+> evidence only about the stage that passed. A successful contactless rehearsal, in particular, is
+> evidence about the command path only — it does not authorize foot contact or a ground jump.
+>
+> The validated bundle, shadow-admission files, and audit logs referenced below live under `logs/`,
+> which is not distributed with this repository. The SHA-256 recorded here identifies the author's
+> validated artifact; export, validate, and record your own before any hardware-bound invocation.
+
 The validated deployment bundle is
 `logs/g1_jump_deploy_bundle_validated`. Its ONNX SHA-256 is
 `e34d9b763fce6df5afd08f8e53c0d32b692e906aea0308f90e232822f05477a2`.
