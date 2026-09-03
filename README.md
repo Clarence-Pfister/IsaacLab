@@ -1,5 +1,15 @@
 ![Isaac Lab](docs/source/_static/isaaclab.jpg)
 
+> [!NOTE]
+> The G1 meshes, MJCF, and generated USD under [`data_storage/`](data_storage) are derived from the
+> Unitree G1 robot description and remain under Unitree Robotics' BSD 3-Clause terms. See
+> [`data_storage/NOTICE.md`](data_storage/NOTICE.md) for the attribution and provenance of
+> everything in that directory.
+>
+> This branch is training-only: it contains no code that commands a physical robot. The hardware
+> deployment path lives on `feature/g1-jump-repeat-flow` and `integration/all`, and carries its own
+> safety documentation — read it before running anything on a real G1.
+
 # IsaacLab G1 Jump
 
 [![Isaac Lab](https://img.shields.io/badge/Isaac%20Lab-3.0.0%20Beta%202-76b900.svg)](https://isaac-sim.github.io/IsaacLab/release/3.0.0-beta2/)
